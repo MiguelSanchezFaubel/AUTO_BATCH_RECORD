@@ -21,7 +21,9 @@ import pythoncom
 import win32com.client as win32
 
 MODO_RESET = True # Este modo recalcula todos los resumenes a partir de las ordenes de produccion desde 0
-GENERAR_PDF_ORDENES = True
+GENERAR_PDF_ORDENES = False # True genera las ordenes, false no las genera
+CONSOLAS = ['EPTEV01V01_CON','EPTEV01V02_CON','EPTEV02V01_CON','EPTEV02V02_CON'] # ARTICULOS QUE NO SE BUSCA EL PNT EN EL RESUMEN DEL ARTICULO
+DISPOSITIVOS = ['EPTEV02DEV01', 'EPTEV02DEV02', 'EPTEV01DEV01', 'EPTEV01DEV02']
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ COMPROBAMOS LOS DIRECTORIOS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 
@@ -32,7 +34,6 @@ RUTA_CONFIG ='./config/config.xlsx'
 INDICE_ARTICULOS = ['MATERIA PRIMA RAW', 'MATERIA PRIMA N1', 'MATERIA PRIMA N2', 'DISPOSITIVOS'] # SIEMPRE ORDENADOS DE MAS PROCESADOS A MENOS PROCESADOS
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ GLOBALES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
 lista_errores = []
 
 patron_lotes = re.compile(
@@ -48,9 +49,7 @@ patron_orden_produccion = re.compile(
     r"^\d{3,4} \d{2}_\d{2}_\d{2}$"
 )
 
-
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ FUNCIONES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
-
 
 def convertir_excel_a_pdf(ruta_excel: str | Path) -> Path:
     """
@@ -1050,24 +1049,30 @@ def buscar_pnt_articulo(df_pnt,componente,lote_numero_buscado):
               
             albaran = fila[columna_albaran]
             pnt = fila.iloc[0]
-            # print(f"El lote {numero_lote_buscado} se ha encontrado en {valor_celda}" )
-            # print(pnt)
-            # time.sleep(1)
+
             return (
                 normalizar_numero_pnt(pnt),
                 "" if pd.isna(albaran)
                 else str(albaran).strip()
             )
-        
-    # Para depurar solo hay prints
-    print("Valor que buscamos: ", numero_lote_buscado)
-    for _, fila in df_pnt_articulo.iterrows():
-        print("Lista de lotes:\n",fila["LOTE / LOT"])
-    time.sleep(0.1)
-
-
+    
+    # --------------- BLOQUE PARA DEPURAR ERRORES RELACIONADOS CON LOTES CONCRETOS -------------------------------------------
+    # if(numero_lote_buscado == '105250554' or numero_lote_buscado==105250554 ):
+    #     for _, fila in df_pnt_articulo.iterrows():
+    #         # Para depurar solo hay prints
+    #             print(
+    #                 "\nLOCALIZADO\n",
+    #                 "\n\nValor que buscamos:\n", numero_lote_buscado,
+    #                 f"\nValor de la celda en la que se lee el rango de lotes dentro del pnt:",
+    #                 fila["LOTE / LOT"],
+    #                 "\n\n\n"
+    #             )
+    #             time.sleep(0.1)
+    #         # print("Lista de lotes:\n",fila["LOTE / LOT"])
+    #     time.sleep(50)
 
     lista_errores.append(f"No se ha encontrado {componente} con lote {numero_lote_buscado} en PNT  ")
+
     return ("","")
 
 def buscar_pnt_orden(df_pnt, nombre_orden, nombre_articulo):
@@ -1323,7 +1328,7 @@ def generar_numeros_serie(serie_inicial, serie_final):
     # ---------------------------------------------------------
     # 7. Generar todas las series
     # ---------------------------------------------------------
-
+    
     numeros_serie = [
         f"{prefijo_inicial}{numero:0{longitud_numero}d}"
         for numero in range(
@@ -1406,8 +1411,10 @@ def distribuir_componente(numeros_serie,df_componente):
                 indice_lote += 1
 
             if indice_lote >= len(lotes):
+
                 raise ValueError(
-                    f"No hay suficientes unidades para completar "
+                    f"{numeros_serie},{df_componente}",
+                    f"No hay suficientes unidades en el lote {indice_lote} para completar "
                     f"la serie {numero_serie}."
                 )
 
@@ -1483,13 +1490,22 @@ def crear_df_consumos_por_nserie(orden_produccion, nombre_articulo, df_produccio
         # Creamos una o varias filas repitiendo el número de serie
         for posicion_consumo in range(numero_filas_serie):
 
-            fila = {
-                "ORDEN DE PRODUCCION": orden_produccion,
-                "NUMERO_SERIE": numero_serie,
-                "UNIDADES": 1,
-                f"{nombre_articulo}_PNT": "",
-            }
 
+            if(nombre_articulo not in CONSOLAS):
+                fila = {
+                    "ORDEN DE PRODUCCION": orden_produccion,
+                    "NUMERO_SERIE": numero_serie,
+                    "UNIDADES": 1,
+                    f"{nombre_articulo}_PNT": "",
+                }
+            else:
+                fila = {
+                    "ORDEN DE PRODUCCION": orden_produccion,
+                    "NUMERO_SERIE": numero_serie,
+                    "UNIDADES": 1,
+                }
+
+            
             for componente in componentes:
 
                 consumos = distribuciones[
@@ -1508,14 +1524,17 @@ def crear_df_consumos_por_nserie(orden_produccion, nombre_articulo, df_produccio
                         consumo["UNIDADES"]
                     )
                     fila[f"{componente}_ALBARAN"] = ""
-                    fila[f"{componente}_PNT"] = ""
+                    
+                    if(componente not in CONSOLAS):
+                        fila[f"{componente}_PNT"] = ""
                 else:
                     # Este componente no necesita otra fila.
                     # Se deja vacío para no duplicar el consumo.
                     fila[f"{componente}_LOTE"] = ""
                     fila[f"{componente}_UNID"] = ""
                     fila[f"{componente}_ALBARAN"] = ""
-                    fila[f"{componente}_PNT"] = ""
+                    if(componente not in CONSOLAS):
+                        fila[f"{componente}_PNT"] = ""
 
             filas_resultado.append(fila)
 
@@ -1530,7 +1549,6 @@ def procesar_orden(ruta_excel):
     Devuelve:
     - Un DataFrame con el resumen de la orden de producción que se tiene que añadir al resumen de ordenes de producción.
     - Este DataFrame contiene una fila por número de serie y por cada componente se indica el PNT y el albaran que corresponda
-
     '''
 
     ruta_excel = Path(ruta_excel)
@@ -1566,6 +1584,15 @@ def procesar_orden(ruta_excel):
     
     numeros_serie = generar_numeros_serie(serie_inicial, serie_final)
 
+    if(len(numeros_serie)>10000):
+        raise ValueError(
+            f"La longitud de los numeros de serie es excesiva y supera los "
+            f"10000, asegurate de que no hay ningun erro en la orden {ruta_excel}."
+        )
+    
+
+    print(len(numeros_serie))
+    time.sleep(1)
     df_produccion = df_excel.iloc[
         9:,
         [0, 1, 4, 5, 7, 8]
@@ -1604,8 +1631,8 @@ def procesar_orden(ruta_excel):
         .str.strip()
     )
 
-    # Contamos cuántas veces aparece el artículo principal en la columna para saber el numero de agrupaciones de la produccion
-    agrupaciones_produccion = (df_produccion["CODIGO"] == nombre_articulo).sum()
+    # # Contamos cuántas veces aparece el artículo principal en la columna para saber el numero de agrupaciones de la produccion
+    # agrupaciones_produccion = (df_produccion["CODIGO"] == nombre_articulo).sum()
 
     df_produccion["SERIE_LOTE"] = (
         df_produccion["SERIE_LOTE"]
@@ -1621,13 +1648,6 @@ def procesar_orden(ruta_excel):
 
     df_produccion = df_produccion.reset_index(drop=True)
 
-    # informacion_orden = {
-    #     "archivo": ruta_excel.name,
-    #     "articulo": nombre_articulo,
-    #     "serie_inicial": serie_inicial,
-    #     "serie_final": serie_final
-    # }
-
     componentes_articulo = (
         df_produccion.loc[
             ~df_produccion["ES_ARTICULO_PRINCIPAL"],
@@ -1641,6 +1661,9 @@ def procesar_orden(ruta_excel):
     )
 
     # Creamos un DataFrame con los consumos por número de serie que se añadira al resumen de ordenes de produccion
+    componentes_articulo = sorted(componentes_articulo, key=lambda elemento: '_CON' not in elemento) # PONEMOS LA CONSOLA EN EL PRIMER ELEMENTO SIEMPRE
+    
+    
     df_consumos = crear_df_consumos_por_nserie(
         orden_produccion=nombre_orden,
         nombre_articulo=nombre_articulo,
@@ -1650,45 +1673,108 @@ def procesar_orden(ruta_excel):
     )
 
     # Buscamos el PNT del artículo principal y lo añadimos al DataFrame
-    pnt_articulo = buscar_pnt_orden(df_pnt=DF_PNT, nombre_orden=nombre_orden,nombre_articulo=nombre_articulo)
-    df_consumos[f"{nombre_articulo}_PNT"] = pnt_articulo
+    if(nombre_articulo not in CONSOLAS):
+        pnt_articulo = buscar_pnt_orden(df_pnt=DF_PNT, nombre_orden=nombre_orden,nombre_articulo=nombre_articulo)
+        df_consumos[f"{nombre_articulo}_PNT"] = pnt_articulo
 
     # Buscamos el PNT y el albarán de cada componente y los añadimos al DataFrame de consumos
+    # print(componentes_articulo)
     for componente in componentes_articulo:
+        if componente not in CONSOLAS:
+            columna_lote = f"{componente}_LOTE"
 
-        columna_lote = f"{componente}_LOTE"
-        columna_pnt = f"{componente}_PNT"
-        columna_albaran = f"{componente}_ALBARAN"
+            if(nombre_articulo not in CONSOLAS):
+                columna_pnt = f"{componente}_PNT"
 
-        # Obtenemos solamente los lotes distintos del componente
-        lotes_unicos = (df_consumos[columna_lote].dropna().astype(str).str.strip())
-        lotes_unicos = lotes_unicos[lotes_unicos != ""].unique()
+            columna_albaran = f"{componente}_ALBARAN"
 
-        # Buscamos el PNT y el albarán una sola vez por cada lote
-        mapa_lote_datos = {
-            lote: buscar_pnt_articulo(df_pnt=DF_PNT,componente=componente,lote_numero_buscado=lote) 
-            for lote in lotes_unicos
-        }
+            # Obtenemos solamente los lotes distintos del componente
+            lotes_unicos = (df_consumos[columna_lote].dropna().astype(str).str.strip())
+            lotes_unicos = lotes_unicos[lotes_unicos != ""].unique()
 
-        # Separamos los PNT y los albaranes en dos diccionarios
-        mapa_lote_pnt = {lote: datos[0]for lote, datos in mapa_lote_datos.items()}
+            # Buscamos el PNT y el albarán una sola vez por cada lote
+            mapa_lote_datos = {
+                lote: buscar_pnt_articulo(df_pnt=DF_PNT,componente=componente,lote_numero_buscado=lote) 
+                for lote in lotes_unicos
+            }
 
-        mapa_lote_albaran = {lote: datos[1]for lote, datos in mapa_lote_datos.items()}
+            # Separamos los PNT y los albaranes en dos diccionarios
+            mapa_lote_pnt = {lote: datos[0] for lote, datos in mapa_lote_datos.items()}
 
-        # Normalizamos la columna de lotes una sola vez
-        serie_lotes = df_consumos[columna_lote].fillna("").astype(str).str.strip()
+            mapa_lote_albaran = {lote: datos[1] for lote, datos in mapa_lote_datos.items()}
 
-        # Asignamos el PNT
-        df_consumos[columna_pnt] = (serie_lotes.map(mapa_lote_pnt).fillna(""))
+            # Normalizamos la columna de lotes una sola vez
+            serie_lotes = df_consumos[columna_lote].fillna("").astype(str).str.strip()
 
-        # Asignamos el albarán
-        df_consumos[columna_albaran] = (serie_lotes.map(mapa_lote_albaran).fillna(""))
+            # Asignamos el PNT
+            if(nombre_articulo not in CONSOLAS):
+                df_consumos[columna_pnt] = (serie_lotes.map(mapa_lote_pnt).fillna(""))
 
-    # df_consumos.to_excel(
-    #     Path.home() / "Desktop" / f"consumos_{nombre_articulo}.xlsx",
-    #     index=False
-    # )
+            # Asignamos el albarán
+            df_consumos[columna_albaran] = (serie_lotes.map(mapa_lote_albaran).fillna(""))
+        
+        else:
+            consola_dispositivo = sorted(componentes_articulo, key=lambda elemento: '_CON' not in elemento)[0]
+            ruta_excel_consola =  RUTA_IMD + consola_dispositivo +"/"+ f"{consola_dispositivo}_RESUMEN.xlsx" 
+            df_consola = pd.read_excel(ruta_excel_consola).drop_duplicates(subset="NUMERO_SERIE", keep="first")
 
+
+            df_consumos[f"{consola_dispositivo}_ALBARAN"] = df_consumos["NUMERO_SERIE"].map(
+                df_consola.set_index("NUMERO_SERIE")["ORDEN DE PRODUCCION"]
+            )
+
+    # PARA LAS CONSOLAS ADEMAS AÑADIMOS OTRAS COLUMNAS ESPECIALES
+
+    if(nombre_articulo  in DISPOSITIVOS):
+
+        # PONEMOS A LA DERECHA DE LA OCLUMA DE LA CONSOLA LAS PCBs del dispositivo
+        consola_dispositivo = sorted(componentes_articulo, key=lambda elemento: '_CON' not in elemento)[0]
+        columna_referencia = f"{consola_dispositivo}_ALBARAN" # Gastamos de referencia la columna de la consola
+        posicion = df_consumos.columns.get_loc(columna_referencia) + 1
+        
+        # OBTENEMOS EL DATAFRAME DE LA CONSOLA DEL EQUIPO
+        ruta_excel_consola =  RUTA_IMD + consola_dispositivo +"/"+ f"{consola_dispositivo}_RESUMEN.xlsx"
+        df_consola = pd.read_excel(ruta_excel_consola).drop_duplicates(subset="NUMERO_SERIE", keep="first")
+        
+        # AÑADIMOS EL NUMERO DE LA CONSOLA/COSOLAS AL DF DE CONSUMOS DEL DISPOSTIVO CORRESPONDIENTE
+        
+        # PROCESAMOS NUMERO DE LAS PCB:
+        if(nombre_articulo in ["EPTEV02DEV01","EPTEV02DEV02"]):
+            print("Añadiendo consolas")
+
+            # Insertamos primero las dos columnas , la de PCP y la de PCBC
+            df_consumos.insert(
+                loc=posicion,
+                column="PCBEPBP",
+                value=None
+            )
+            df_consumos.insert(
+                loc=posicion + 1 ,
+                column="PCBEPBC",
+                value=None
+            )
+            # Una vez insertadas las rellenamos PCBP con el valor que coincida en el excel de la consola
+            df_consumos["PCBEPBP"] = df_consumos["NUMERO_SERIE"].map(
+                df_consola.set_index("NUMERO_SERIE")[f"PCBEPBP_LOTE"]
+            )
+            # Una vez insertadas las rellenamos PCBC con el valor que coincida en el excel de la consola
+            df_consumos["PCBEPBC"] = df_consumos["NUMERO_SERIE"].map(
+                df_consola.set_index("NUMERO_SERIE")[f"PCBEPBC_LOTE"]
+            ) 
+        elif (nombre_articulo in ["EPTEV01DEV01","EPTEV01DEV02"]):# PARA EQUIPOS EPTEV01 SOLO HAY UNA CONSOLA
+
+            df_consumos.insert(
+                loc=posicion + 1,
+                column="PCBEPV01",
+                value=None
+            )
+            df_consumos["PCBEPV01"] = df_consumos["NUMERO_SERIE"].map(
+                df_consola.set_index("NUMERO_SERIE")[f"PCBEPV01_LOTE"]
+            )
+
+        # PROCESAMOS CHECKLIST Y FECHA DE FABRICACION
+        # PROCESAMOS ALBARAN DE SALIDA
+        # PROCESAMOS SI TIENE ETIQUETAS  (COLUMNA IDIOMAS ALBARAN Y REGDE LAS ETIQEUTAS)
     return df_consumos
 
 def leer_excel_resumen(directorio_articulo):
@@ -1794,15 +1880,8 @@ dic_config = leer_configuracion()
 
 if __name__ == "__main__":
 
-    RUTA_IMD = RUTA_RAIZ + 'PNT MDR/ERP/I+D/'
-    # RUTA_PHB = RUTA_IMD + 'PHB1V01_TEST/' # TODO BORRAR TEMPORAL
-    
-    # carpetas_articulos = [RUTA_PHB] # TODO CAMBIAR POR DIRECTORIO DE PROVEEDORES !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    
-    # print(f"Procesando carpeta: {carpetas_articulos}...")
-    
     articulos_IMD = os.listdir(RUTA_IMD)      # Todos los articulos 
-    articulos_IMD = ['EPTEV02V01_CON']                 # Elegir manualmente los articulos
+    articulos_IMD = ['EPTEV02DEV01']        # Elegir manualmente los articulos
 
     articulos_procesados = [] # Lista que contiene los articulos ya procesados
     articulos_pendientes = articulos_IMD.copy()
@@ -1817,11 +1896,11 @@ if __name__ == "__main__":
             # if i  in 'DISPOSITIVOS':
             #     break # No procesamos aun los dispositivos
 
-            # if i in 'MATERIA PRIMA N2':
-            #     break # No procesamos aun la materia prima de nivel 2 (COnsolas)
+            if i in 'MATERIA PRIMA N2':
+                break # No procesamos aun la materia prima de nivel 2 (Consolas)
 
-            # if i in 'MATERIA PRIMA N1':
-            #     break # No procesamos aun la materia prima de nivel 1
+            if i in 'MATERIA PRIMA N1':
+                break # No procesamos aun la materia prima de nivel 1
 
             if articulo in articulos_IMD:
                 print("Procesando el articulo: ",articulo)
@@ -1873,8 +1952,10 @@ if __name__ == "__main__":
                     print(f"Procesando orden de producción: {ruta_orden_excel.name}...")
                     
                     df_consumos_orden = procesar_orden(ruta_orden_excel)
+
                     if GENERAR_PDF_ORDENES:
                         convertir_excel_a_pdf(ruta_orden_excel)
+
                     if df_consumos_orden is not None: # Si no es none
                         lista_dataframes_ordenes.append(df_consumos_orden)
                 
