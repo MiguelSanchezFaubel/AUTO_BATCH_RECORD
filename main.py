@@ -20,10 +20,18 @@ import unicodedata
 import pythoncom
 import win32com.client as win32
 
+from pdf_gen import *
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ "COMPILACION" ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
 MODO_RESET = True # Este modo recalcula todos los resumenes a partir de las ordenes de produccion desde 0
 GENERAR_PDF_ORDENES = False # True genera las ordenes, false no las genera
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ CONSTANTES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
 CONSOLAS = ['EPTEV01V01_CON','EPTEV01V02_CON','EPTEV02V01_CON','EPTEV02V02_CON'] # ARTICULOS QUE NO SE BUSCA EL PNT EN EL RESUMEN DEL ARTICULO
 DISPOSITIVOS = ['EPTEV02DEV01', 'EPTEV02DEV02', 'EPTEV01DEV01', 'EPTEV01DEV02']
+INDICE_ARTICULOS = ['MATERIA PRIMA RAW', 'MATERIA PRIMA N1', 'MATERIA PRIMA N2', 'DISPOSITIVOS'] # SIEMPRE ORDENADOS DE MAS PROCESADOS A MENOS PROCESADOS
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ COMPROBAMOS LOS DIRECTORIOS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 
@@ -31,9 +39,11 @@ RUTA_RAIZ = './data/'
 RUTA_IMD = RUTA_RAIZ + 'PNT MDR/ERP/I+D/'
 RUTA_PNT ='./data/REG.7.5-02-02_CONTROL PNT.xlsx'
 RUTA_CONFIG ='./config/config.xlsx'
-INDICE_ARTICULOS = ['MATERIA PRIMA RAW', 'MATERIA PRIMA N1', 'MATERIA PRIMA N2', 'DISPOSITIVOS'] # SIEMPRE ORDENADOS DE MAS PROCESADOS A MENOS PROCESADOS
+RUTA_CHECKLIST = 'PNT MDR/ERP/I+D/'
+RUTA_ETIQUETAS = './data/IMPRESION_ETIQUETAS/' # PARA LOS REQUISITOS ESPECIALES DEL BACH RECORD DISPOSITIVOS FUERA DE ESPAÑA
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ GLOBALES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 lista_errores = []
 
 patron_lotes = re.compile(
@@ -50,6 +60,65 @@ patron_orden_produccion = re.compile(
 )
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ FUNCIONES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+def obtener_unico_excel(directorio):
+    """
+    Busca archivos Excel en un directorio y comprueba
+    que exista exactamente uno.
+
+    Devuelve:
+        Path del Excel encontrado.
+
+    Genera:
+        FileNotFoundError si no hay ningún Excel.
+        ValueError si hay más de un Excel.
+    """
+
+    directorio = Path(directorio)
+
+    if not directorio.exists():
+        raise FileNotFoundError(
+            f"El directorio no existe: {directorio}"
+        )
+
+    if not directorio.is_dir():
+        raise NotADirectoryError(
+            f"La ruta no es un directorio: {directorio}"
+        )
+
+    extensiones_excel = {
+        ".xlsx",
+        ".xlsm",
+        ".xls"
+    }
+
+    excels = [
+        archivo
+        for archivo in directorio.iterdir()
+        if archivo.is_file()
+        and archivo.suffix.lower() in extensiones_excel
+        and not archivo.name.startswith("~$")
+    ]
+
+    # Ordenamos por nombre
+    excels.sort()
+
+    if len(excels) == 0:
+        raise FileNotFoundError(
+            f"No se ha encontrado ningún Excel en: {directorio}"
+        )
+
+    if len(excels) > 1:
+        nombres = "\n".join(
+            f" - {archivo.name}"
+            for archivo in excels
+        )
+
+        raise ValueError(
+            f"Se esperaba un único Excel, pero se han encontrado "
+            f"{len(excels)}:\n{nombres}"
+        )
+
+    return excels[0]
 
 def convertir_excel_a_pdf(ruta_excel: str | Path) -> Path:
     """
@@ -1214,7 +1283,7 @@ def buscar_pnt_orden(df_pnt, nombre_orden, nombre_articulo):
         
     return pnt
 
-def generar_numeros_serie(serie_inicial, serie_final):
+def generar_numeros_serie(serie_inicial, serie_final, nombre_orden, nombre_articulo):
     """
     Genera todos los números de serie comprendidos entre
     una serie inicial y una serie final.
@@ -1262,16 +1331,15 @@ def generar_numeros_serie(serie_inicial, serie_final):
         serie_final
     )
 
-    if (
-        coincidencia_inicial is None
-        or coincidencia_final is None
-    ):
-        raise ValueError(
-            "Los números de serie no tienen un formato válido. "
+    if ( coincidencia_inicial is None or coincidencia_final is None):
+        msg_error = (
+            f"Los números de serie del articulo {nombre_articulo} no tienen un formato válido. "
+            f"Orden del articulo {nombre_orden}"
             f"Valores recibidos: '{serie_inicial}' y "
             f"'{serie_final}'."
         )
-
+        lista_errores.append(msg_error)
+        raise ValueError(msg_error)
     # ---------------------------------------------------------
     # 3. Obtener prefijos y números
     # ---------------------------------------------------------
@@ -1297,11 +1365,16 @@ def generar_numeros_serie(serie_inicial, serie_final):
     # ---------------------------------------------------------
 
     if prefijo_inicial.upper() != prefijo_final.upper():
-        raise ValueError(
+        msg_error = (
+            f"Los números de serie del articulo {nombre_articulo} con "
+            f"orden  {nombre_orden}-->"
             "La serie inicial y la serie final tienen "
             "prefijos diferentes: "
             f"'{prefijo_inicial}' y '{prefijo_final}'."
         )
+        lista_errores.append(msg_error)
+        raise ValueError(msg_error)
+
 
     # ---------------------------------------------------------
     # 5. Convertir la parte numérica a entero
@@ -1311,10 +1384,14 @@ def generar_numeros_serie(serie_inicial, serie_final):
     numero_final = int(numero_final_texto)
 
     if numero_final < numero_inicial:
-        raise ValueError(
+        msg_error = (
+            f"Los números de serie del articulo {nombre_articulo} con "
+            f"orden  {nombre_orden}-->"
             "La serie final es menor que la serie inicial: "
             f"{numero_inicial} > {numero_final}."
         )
+        lista_errores.append(msg_error)
+        return msg_error
 
     # ---------------------------------------------------------
     # 6. Determinar la cantidad de dígitos
@@ -1336,6 +1413,14 @@ def generar_numeros_serie(serie_inicial, serie_final):
             numero_final + 1
         )
     ]
+
+    if(len(numeros_serie)>10000):
+        msg_error = (
+            f"La longitud de los numeros de serie es excesiva y supera los "
+            f"10000, asegurate de que no hay ningun erro en la orden {nombre_orden} del articulo {nombre_articulo}."
+        )
+        lista_errores.append(msg_error)
+        raise ValueError(msg_error)
 
     return numeros_serie
 
@@ -1582,17 +1667,17 @@ def procesar_orden(ruta_excel):
 
     print(f"Procesnado Orden {nombre_orden} - Artículo: {nombre_articulo}, Serie Inicial: {serie_inicial}, Serie Final: {serie_final}")
     
-    numeros_serie = generar_numeros_serie(serie_inicial, serie_final)
-
-    if(len(numeros_serie)>10000):
-        raise ValueError(
-            f"La longitud de los numeros de serie es excesiva y supera los "
-            f"10000, asegurate de que no hay ningun erro en la orden {ruta_excel}."
-        )
+    try:
+        numeros_serie = generar_numeros_serie(serie_inicial, serie_final, nombre_orden, nombre_articulo)
     
-
-    print(len(numeros_serie))
-    time.sleep(1)
+    except:
+        
+        print(lista_errores[-1])
+        time.sleep(2)
+        return None
+    # print(len(numeros_serie))
+    # time.sleep(1)
+    
     df_produccion = df_excel.iloc[
         9:,
         [0, 1, 4, 5, 7, 8]
@@ -1772,9 +1857,10 @@ def procesar_orden(ruta_excel):
                 df_consola.set_index("NUMERO_SERIE")[f"PCBEPV01_LOTE"]
             )
 
-        # PROCESAMOS CHECKLIST Y FECHA DE FABRICACION
+        # PROCESAMOS CHECKLIST Y FECHA DE FABRICACION TODO
         # PROCESAMOS ALBARAN DE SALIDA
         # PROCESAMOS SI TIENE ETIQUETAS  (COLUMNA IDIOMAS ALBARAN Y REGDE LAS ETIQEUTAS)
+        
     return df_consumos
 
 def leer_excel_resumen(directorio_articulo):
@@ -1847,6 +1933,23 @@ def leer_excel_resumen(directorio_articulo):
 
     return  df_resumen , ordenes_produccion, ruta_resumen
 
+# def busca_albaran_pdf(nombre_albaran, articulo):
+#     """
+
+#     """
+
+#     # ruta_carpeta_articulo = Path(RUTA_IMD) / articulo
+
+#     # patron_albaran = re.compile(
+#     #     rf"(?i).*{re.escape(nombre_albaran)}.*\.pdf$"
+#     # )
+
+#     # for archivo in ruta_carpeta_articulo.iterdir():
+#     #     if archivo.is_file() and patron_albaran.fullmatch(archivo.name):
+#     #         return archivo
+
+#     return None
+
 def obtener_ordenes_por_procesar(
     ordenes_produccion_excel,
     ordenes_procesadas
@@ -1875,101 +1978,374 @@ def obtener_ordenes_por_procesar(
 
     return ordenes_por_procesar
 
+def obtener_requisitos_especiales(dispositivo, ns_ini, ns_final):
+    """
+    Devuelve un diccionario con los requisitos especiales de un artículo
+    en función de su número de serie inicial y final.
+    """
+    def convertir_lista_en_rangos(ns_inicio,ns_final,lista_ns,requisito):
+        """
+        Filtra los números de serie contenidos entre ns_inicio y ns_final,
+        agrupa los consecutivos en rangos y devuelve una lista de diccionarios.
+
+        Ejemplo de salida:
+
+        [
+            {
+                "inicio": "EPB1230001",
+                "final": "EPB1230011",
+                "requisito": "INGLES",
+            },
+            ...
+        ]
+        """
+
+        def separar_numero_serie(ns):
+
+            resultado = re.match(r"^(.*?)(\d+)$", str(ns))
+
+            if not resultado:
+                raise ValueError(
+                    f"Número de serie no válido: {ns}"
+                )
+
+            prefijo = resultado.group(1)
+            numero_texto = resultado.group(2)
+
+            return (
+                prefijo,
+                int(numero_texto),
+                len(numero_texto)
+            )
+
+
+        # ---------------------------------------------
+        # Analizar rango general
+        # ---------------------------------------------
+
+        prefijo_inicio, numero_inicio, longitud = separar_numero_serie(
+            ns_inicio
+        )
+
+        prefijo_final, numero_final, longitud_final = separar_numero_serie(
+            ns_final
+        )
+
+
+        if prefijo_inicio != prefijo_final:
+            raise ValueError(
+                "El número de serie inicial y final tienen prefijos diferentes"
+            )
+
+        if longitud != longitud_final:
+            raise ValueError(
+                "El número de serie inicial y final tienen distinta longitud"
+            )
+
+        if numero_inicio > numero_final:
+            raise ValueError(
+                "El número de serie inicial es mayor que el final"
+            )
+
+
+        # ---------------------------------------------
+        # Buscar NS de la lista que están dentro
+        # del rango general
+        # ---------------------------------------------
+
+        numeros = []
+
+        for ns in lista_ns:
+
+            try:
+                prefijo, numero, _ = separar_numero_serie(ns)
+
+            except ValueError:
+                continue
+
+            if (
+                prefijo == prefijo_inicio
+                and numero_inicio <= numero <= numero_final
+            ):
+                numeros.append(numero)
+
+
+        # Eliminar duplicados y ordenar
+        numeros = sorted(set(numeros))
+
+
+        if not numeros:
+            return []
+
+
+        # ---------------------------------------------
+        # Crear rangos consecutivos
+        # ---------------------------------------------
+
+        rangos = []
+
+        inicio_rango = numeros[0]
+        anterior = numeros[0]
+
+
+        for numero in numeros[1:]:
+
+            if numero == anterior + 1:
+
+                anterior = numero
+
+            else:
+
+                # Guardamos el rango anterior
+                rangos.append({
+                    "inicio":
+                        f"{prefijo_inicio}"
+                        f"{inicio_rango:0{longitud}d}",
+
+                    "final":
+                        f"{prefijo_inicio}"
+                        f"{anterior:0{longitud}d}",
+
+                    "requisito": requisito,
+                })
+
+                # Empezamos nuevo rango
+                inicio_rango = numero
+                anterior = numero
+
+
+        # ---------------------------------------------
+        # Añadir último rango
+        # ---------------------------------------------
+
+        rangos.append({
+            "inicio":
+                f"{prefijo_inicio}"
+                f"{inicio_rango:0{longitud}d}",
+
+            "final":
+                f"{prefijo_inicio}"
+                f"{anterior:0{longitud}d}",
+
+            "requisito": requisito,
+        })
+
+
+        return rangos
+
+    def validar_6_digitos(valor):
+        """
+        Devuelve una cadena de exactamente 6 dígitos.
+
+        - Si tiene más de 6 caracteres, conserva los 6 de la derecha.
+        - Si tiene menos de 6 caracteres, lanza ValueError.
+        - Si los 6 caracteres finales no son números, lanza ValueError.
+        """
+
+        valor = str(valor).strip()
+
+        # Si tiene más de 6, coger los 6 de la derecha
+        if len(valor) > 6:
+            valor = valor[-6:]
+
+        # Debe tener exactamente 6 caracteres
+        if len(valor) != 6:
+            raise ValueError(
+                f"El valor debe contener al menos 6 caracteres: {valor}"
+            )
+
+        # Validar que todos son números
+        if not valor.isdigit():
+            raise ValueError(
+                f"Los 6 caracteres deben ser numéricos: {valor}"
+            )
+        return valor
+
+    try:
+        ns_ini =  validar_6_digitos(ns_ini)
+        ns_final = validar_6_digitos(ns_final)
+    except:
+        print(f"Los números de serie inicial y final deben tener al menos 6 dígitos fucnion requisitos especiales: {ns_ini}, {ns_final}")
+        time.sleep(4)
+
+    dispositivos_especiales = os.listdir(RUTA_ETIQUETAS)
+    if dispositivo not in dispositivos_especiales:
+        print(f"El dispositivo {dispositivo} no se encuentran las etiqeutas impresas en otros idiomas.")
+        return None
+
+    idiomas_dispositivo  = os.listdir(RUTA_ETIQUETAS + dispositivo +'/')
+    requisitos = []
+    for idioma in idiomas_dispositivo:
+        if "ES" in idioma or "desktop.ini" in idioma: # ESPAÑA NO TIENE REQUISITOS ESPECIALES, SOLO LOS DEMAS IDIOMAS
+            continue
+        if "EN" in idioma:
+            txt_pais = "INGLES"
+        if "FR" in idioma:
+            txt_pais = "FRANCES"
+        if "IT" in idioma:
+            txt_pais = "ITALIANO"
+
+        excel = obtener_unico_excel(RUTA_ETIQUETAS + dispositivo +'/'+ idioma +'/')
+        df_etiquetas = pd.read_excel(excel)
+        numeros_serie = df_etiquetas["SN"].tolist()
+        requisitos_idioma = convertir_lista_en_rangos(ns_ini, ns_final, numeros_serie, txt_pais)
+
+        if requisitos_idioma:
+            requisitos.append(requisitos_idioma)
+
+    lista_final = [
+        diccionario
+        for sublista in requisitos
+        for diccionario in sublista
+    ]
+    print(f"Requisitos especiales encontrados para {dispositivo}:")
+    print(lista_final)
+
+    if dispositivo in "EPTEV02DEV01":
+        pre = "EPB1"
+    elif dispositivo in "EPTEV02DEV02":
+        pre = "EPB2"
+    elif dispositivo in "EPTEV01DEV01":
+        pre = "EP1"
+    elif dispositivo in "EPTEV01DEV02":
+        pre = "EP2"
+    else:
+        pre = ""
+
+    for item in lista_final:
+        item["inicio"] = pre + item["inicio"]
+        item["final"] = pre + item["final"]
+            
+    return lista_final
+
 DF_PNT = leer_excel_PNTs()
 dic_config = leer_configuracion()
 
 if __name__ == "__main__":
 
-    articulos_IMD = os.listdir(RUTA_IMD)      # Todos los articulos 
-    articulos_IMD = ['EPTEV02DEV01']        # Elegir manualmente los articulos
 
-    articulos_procesados = [] # Lista que contiene los articulos ya procesados
-    articulos_pendientes = articulos_IMD.copy()
+    rec = obtener_requisitos_especiales("EPTEV02DEV01","260780","260916")
 
-    for i in INDICE_ARTICULOS:
+    bachredord = GeneradorBatchRecord("BATCH_RECORD_EPTE.pdf")
+    bachredord.crear_portada(
 
-        # print("\nProcesando los articulos de: ",i,'\n')
+        lote="XXXX",
 
-        # Procesamos los articulos ordenados de menos procesado a mas procesado
-        for articulo in dic_config[i]:
-            
-            # if i  in 'DISPOSITIVOS':
-            #     break # No procesamos aun los dispositivos
+        dispositivo="EPTEV02DEV01",
 
-            if i in 'MATERIA PRIMA N2':
-                break # No procesamos aun la materia prima de nivel 2 (Consolas)
+        ns_inicio="EPB1230001",
+        ns_final="EPB1230090",
 
-            if i in 'MATERIA PRIMA N1':
-                break # No procesamos aun la materia prima de nivel 1
+        software_version="4643_3385",
 
-            if articulo in articulos_IMD:
-                print("Procesando el articulo: ",articulo)
-                articulos_procesados.append(articulo)
-                articulos_pendientes.remove(articulo)
-                
-                ruta_carpeta_articulo =  Path(RUTA_IMD + articulo +'/')
+        requisitos_especiales=rec,
 
-                normalizar_nombres_archivos(ruta_carpeta_articulo) # Normalizamos los nombres de los archivos en la carpeta del artículo
+        preparado_por="Victoria E. González Gutiérrez",
+        cargo_preparado="Regulatory Responsible",
 
-                ordenes_produccion_excel = [
-                    archivo
-                    for archivo in ruta_carpeta_articulo.iterdir()
-                    if archivo.is_file()
-                    and archivo.suffix.lower() in (".xlsx", ".xls")
-                    and patron_orden_produccion.fullmatch(archivo.stem.strip())
-                ]
-                
-                ordenes_produccion_excel = ordenar_ordenes_produccion(ordenes_produccion_excel)
+        revisado_por="Victoria E. González Gutiérrez",
+        cargo_revisado="Quality Manager",
 
-                lista_dataframes_ordenes = [] # es una lista que contiene todos los dataframes de consumos de las ordenes que se van a procesar y se usar para unirlos luego al resumen
-                
-                # Leemos el resuemnexistente de ordnes del articulo si existe, sino lo creamos
-                try:
-                    df_resumen, ordenes_procesadas, ruta_resumen = leer_excel_resumen(ruta_carpeta_articulo)
+        aprobado_por="Josep Oliver Garcia",
+        cargo_aprobado="Manager",
 
-                except:
-                    
-                    print(f" \nAVISO: No se pudo leer el resumen existente en {ruta_carpeta_articulo} se va a realizar el reseteo del resumen del articulo {articulo}.\n")
-                    time.sleep(1)
-                    
-                    ordenes_procesadas = []
-                    df_resumen = pd.DataFrame()
-                    ruta_resumen = ruta_carpeta_articulo / f"{articulo}_RESUMEN.xlsx"
-
-                else:
-                    lista_dataframes_ordenes.append(df_resumen)
-                
-                if MODO_RESET: # Fuerza que se procesen todas las carpetas de ordenes desde 0
-                    lista_dataframes_ordenes = [] # Limpiamos la lista
-                    ordenes_procesadas = []
-                    ruta_resumen = ruta_carpeta_articulo / f"{articulo}_RESUMEN.xlsx"
-                    df_resumen = pd.DataFrame()
-                
-                ordenes_por_procesar = obtener_ordenes_por_procesar(ordenes_produccion_excel, ordenes_procesadas)
-                # print("\ordenes_por_procesar del articulo {articulo}:\n",ordenes_por_procesar)
-        
-                for ruta_orden_excel in ordenes_por_procesar:
-                    print(f"Procesando orden de producción: {ruta_orden_excel.name}...")
-                    
-                    df_consumos_orden = procesar_orden(ruta_orden_excel)
-
-                    if GENERAR_PDF_ORDENES:
-                        convertir_excel_a_pdf(ruta_orden_excel)
-
-                    if df_consumos_orden is not None: # Si no es none
-                        lista_dataframes_ordenes.append(df_consumos_orden)
-                
-                df_resumen = pd.concat(lista_dataframes_ordenes,ignore_index=True)
-
-                # Guardamos el dataframe en el excel resumen del artuculo
-                df_resumen.to_excel(ruta_resumen, index=False)
-
-    # Guardamos el dataframe en el excel resumen del artuculo
-    df_errores = pd.DataFrame(set(lista_errores))
-    df_errores.to_excel(
-        './errores.xlsx',
-        index=False
+        fecha_preparado="2024/02/15",
+        fecha_revisado="2024/02/15",
+        fecha_aprobado="2024/02/15",
     )
+
+    bachredord.guardar()
+
+    # articulos_IMD = os.listdir(RUTA_IMD)      # Todos los articulos 
+    # # articulos_IMD = ['EPTEV02DEV02']        # Elegir manualmente los articulos
+
+    # articulos_procesados = [] # Lista que contiene los articulos ya procesados
+    # articulos_pendientes = articulos_IMD.copy()
+
+    # for i in INDICE_ARTICULOS:
+
+    #     # print("\nProcesando los articulos de: ",i,'\n')
+
+    #     # Procesamos los articulos ordenados de menos procesado a mas procesado
+    #     for articulo in dic_config[i]:
             
-    print('\nSe han procesado los articulos:',articulos_procesados,'\n')
-    print('\nQuedan pendientes de procesar:',articulos_pendientes,'\n')
+    #         # if i  in 'DISPOSITIVOS':
+    #         #     break # No procesamos aun los dispositivos
+
+    #         # if i in 'MATERIA PRIMA N2':
+    #         #     break # No procesamos aun la materia prima de nivel 2 (Consolas)
+
+    #         # if i in 'MATERIA PRIMA N1':
+    #         #     break # No procesamos aun la materia prima de nivel 1
+
+    #         if articulo in articulos_IMD:
+    #             print("Procesando el articulo: ",articulo)
+    #             articulos_procesados.append(articulo)
+    #             articulos_pendientes.remove(articulo)
+                
+    #             ruta_carpeta_articulo =  Path(RUTA_IMD + articulo +'/')
+
+    #             normalizar_nombres_archivos(ruta_carpeta_articulo) # Normalizamos los nombres de los archivos en la carpeta del artículo
+
+    #             ordenes_produccion_excel = [
+    #                 archivo
+    #                 for archivo in ruta_carpeta_articulo.iterdir()
+    #                 if archivo.is_file()
+    #                 and archivo.suffix.lower() in (".xlsx", ".xls")
+    #                 and patron_orden_produccion.fullmatch(archivo.stem.strip())
+    #             ]
+                
+    #             ordenes_produccion_excel = ordenar_ordenes_produccion(ordenes_produccion_excel)
+
+    #             lista_dataframes_ordenes = [] # es una lista que contiene todos los dataframes de consumos de las ordenes que se van a procesar y se usar para unirlos luego al resumen
+                
+    #             # Leemos el resuemnexistente de ordnes del articulo si existe, sino lo creamos
+    #             try:
+    #                 df_resumen, ordenes_procesadas, ruta_resumen = leer_excel_resumen(ruta_carpeta_articulo)
+
+    #             except:
+                    
+    #                 print(f" \nAVISO: No se pudo leer el resumen existente en {ruta_carpeta_articulo} se va a realizar el reseteo del resumen del articulo {articulo}.\n")
+    #                 time.sleep(1)
+                    
+    #                 ordenes_procesadas = []
+    #                 df_resumen = pd.DataFrame()
+    #                 ruta_resumen = ruta_carpeta_articulo / f"{articulo}_RESUMEN.xlsx"
+
+    #             else:
+    #                 lista_dataframes_ordenes.append(df_resumen)
+                
+    #             if MODO_RESET: # Fuerza que se procesen todas las carpetas de ordenes desde 0
+    #                 lista_dataframes_ordenes = [] # Limpiamos la lista
+    #                 ordenes_procesadas = []
+    #                 ruta_resumen = ruta_carpeta_articulo / f"{articulo}_RESUMEN.xlsx"
+    #                 df_resumen = pd.DataFrame()
+                
+    #             ordenes_por_procesar = obtener_ordenes_por_procesar(ordenes_produccion_excel, ordenes_procesadas)
+    #             # print("\ordenes_por_procesar del articulo {articulo}:\n",ordenes_por_procesar)
+        
+    #             for ruta_orden_excel in ordenes_por_procesar:
+    #                 print(f"Procesando orden de producción: {ruta_orden_excel.name}...")
+                    
+    #                 df_consumos_orden = procesar_orden(ruta_orden_excel)
+
+    #                 if GENERAR_PDF_ORDENES:
+    #                     convertir_excel_a_pdf(ruta_orden_excel)
+
+    #                 if df_consumos_orden is not None: # Si no es none
+    #                     lista_dataframes_ordenes.append(df_consumos_orden)
+                
+    #             df_resumen = pd.concat(lista_dataframes_ordenes,ignore_index=True)
+
+    #             # Guardamos el dataframe en el excel resumen del artuculo
+    #             df_resumen.to_excel(ruta_resumen, index=False)
+
+    # # Guardamos el dataframe en el excel resumen del artuculo
+    # df_errores = pd.DataFrame(set(lista_errores))
+    # df_errores.to_excel(
+    #     './errores.xlsx',
+    #     index=False
+    # )
+            
+    # print('\nSe han procesado los articulos:',articulos_procesados,'\n')
+    # print('\nQuedan pendientes de procesar:',articulos_pendientes,'\n')
