@@ -1983,90 +1983,90 @@ def obtener_requisitos_especiales(dispositivo, ns_ini, ns_final):
     Devuelve un diccionario con los requisitos especiales de un artículo
     en función de su número de serie inicial y final.
     """
+
+    ns_ini = str(ns_ini)[-4:]       # Solo ncesitamos los ultimos 4 digitos
+    ns_final = str(ns_final)[-4:]   # Solo ncesitamos los ultimos 4 digitos
     def convertir_lista_en_rangos(ns_inicio,ns_final,lista_ns,requisito):
         """
-        Filtra los números de serie contenidos entre ns_inicio y ns_final,
-        agrupa los consecutivos en rangos y devuelve una lista de diccionarios.
+        Filtra y agrupa números de serie usando únicamente
+        los 4 últimos dígitos XXXX.
 
-        Ejemplo de salida:
+        Ejemplo:
+            ns_inicio = "EPB1250442"  -> 0442
+            ns_final  = "EPB1260600"  -> 0600
 
-        [
-            {
-                "inicio": "EPB1230001",
-                "final": "EPB1230011",
-                "requisito": "INGLES",
-            },
-            ...
-        ]
+        lista_ns puede contener:
+            EPB1250442
+            250442
+            0442
+            etc.
+
+        Devuelve:
+            [
+                {
+                    "inicio": "0442",
+                    "final": "0445",
+                    "requisito": "INGLES",
+                },
+                ...
+            ]
         """
 
-        def separar_numero_serie(ns):
+        def obtener_4_digitos(valor):
+            """
+            Devuelve los 4 últimos dígitos del valor.
+            """
 
-            resultado = re.match(r"^(.*?)(\d+)$", str(ns))
+            valor = str(valor).strip()
 
-            if not resultado:
+            # Por si pandas/Excel devuelve algo como 250442.0
+            if valor.endswith(".0"):
+                valor = valor[:-2]
+
+            if len(valor) < 4:
                 raise ValueError(
-                    f"Número de serie no válido: {ns}"
+                    f"El valor debe contener al menos 4 caracteres: {valor}"
                 )
 
-            prefijo = resultado.group(1)
-            numero_texto = resultado.group(2)
+            numero = valor[-4:]
 
-            return (
-                prefijo,
-                int(numero_texto),
-                len(numero_texto)
-            )
+            if not numero.isdigit():
+                raise ValueError(
+                    f"Los últimos 4 caracteres deben ser numéricos: {valor}"
+                )
 
-
-        # ---------------------------------------------
-        # Analizar rango general
-        # ---------------------------------------------
-
-        prefijo_inicio, numero_inicio, longitud = separar_numero_serie(
-            ns_inicio
-        )
-
-        prefijo_final, numero_final, longitud_final = separar_numero_serie(
-            ns_final
-        )
+            return int(numero)
 
 
-        if prefijo_inicio != prefijo_final:
-            raise ValueError(
-                "El número de serie inicial y final tienen prefijos diferentes"
-            )
+        # ========================================================
+        # RANGO GENERAL
+        # ========================================================
 
-        if longitud != longitud_final:
-            raise ValueError(
-                "El número de serie inicial y final tienen distinta longitud"
-            )
+        numero_inicio = obtener_4_digitos(ns_inicio)
+        numero_final = obtener_4_digitos(ns_final)
 
         if numero_inicio > numero_final:
             raise ValueError(
-                "El número de serie inicial es mayor que el final"
+                f"El número inicial {numero_inicio:04d} "
+                f"es mayor que el final {numero_final:04d}"
             )
 
 
-        # ---------------------------------------------
-        # Buscar NS de la lista que están dentro
-        # del rango general
-        # ---------------------------------------------
+        # ========================================================
+        # FILTRAR LOS NS QUE ESTÁN DENTRO DEL RANGO
+        # ========================================================
 
         numeros = []
 
         for ns in lista_ns:
 
             try:
-                prefijo, numero, _ = separar_numero_serie(ns)
+                numero = obtener_4_digitos(ns)
 
             except ValueError:
                 continue
 
-            if (
-                prefijo == prefijo_inicio
-                and numero_inicio <= numero <= numero_final
-            ):
+            if numero_inicio <= numero <= numero_final:
                 numeros.append(numero)
 
 
@@ -2078,9 +2078,9 @@ def obtener_requisitos_especiales(dispositivo, ns_ini, ns_final):
             return []
 
 
-        # ---------------------------------------------
-        # Crear rangos consecutivos
-        # ---------------------------------------------
+        # ========================================================
+        # CREAR RANGOS CONSECUTIVOS
+        # ========================================================
 
         rangos = []
 
@@ -2096,81 +2096,28 @@ def obtener_requisitos_especiales(dispositivo, ns_ini, ns_final):
 
             else:
 
-                # Guardamos el rango anterior
                 rangos.append({
-                    "inicio":
-                        f"{prefijo_inicio}"
-                        f"{inicio_rango:0{longitud}d}",
-
-                    "final":
-                        f"{prefijo_inicio}"
-                        f"{anterior:0{longitud}d}",
-
+                    "inicio": f"{inicio_rango:04d}",
+                    "final": f"{anterior:04d}",
                     "requisito": requisito,
                 })
 
-                # Empezamos nuevo rango
                 inicio_rango = numero
                 anterior = numero
 
 
-        # ---------------------------------------------
-        # Añadir último rango
-        # ---------------------------------------------
-
+        # Último rango
         rangos.append({
-            "inicio":
-                f"{prefijo_inicio}"
-                f"{inicio_rango:0{longitud}d}",
-
-            "final":
-                f"{prefijo_inicio}"
-                f"{anterior:0{longitud}d}",
-
+            "inicio": f"{inicio_rango:04d}",
+            "final": f"{anterior:04d}",
             "requisito": requisito,
         })
 
-
         return rangos
-
-    def validar_6_digitos(valor):
-        """
-        Devuelve una cadena de exactamente 6 dígitos.
-
-        - Si tiene más de 6 caracteres, conserva los 6 de la derecha.
-        - Si tiene menos de 6 caracteres, lanza ValueError.
-        - Si los 6 caracteres finales no son números, lanza ValueError.
-        """
-
-        valor = str(valor).strip()
-
-        # Si tiene más de 6, coger los 6 de la derecha
-        if len(valor) > 6:
-            valor = valor[-6:]
-
-        # Debe tener exactamente 6 caracteres
-        if len(valor) != 6:
-            raise ValueError(
-                f"El valor debe contener al menos 6 caracteres: {valor}"
-            )
-
-        # Validar que todos son números
-        if not valor.isdigit():
-            raise ValueError(
-                f"Los 6 caracteres deben ser numéricos: {valor}"
-            )
-        return valor
-
-    try:
-        ns_ini =  validar_6_digitos(ns_ini)
-        ns_final = validar_6_digitos(ns_final)
-    except:
-        print(f"Los números de serie inicial y final deben tener al menos 6 dígitos fucnion requisitos especiales: {ns_ini}, {ns_final}")
-        time.sleep(4)
 
     dispositivos_especiales = os.listdir(RUTA_ETIQUETAS)
     if dispositivo not in dispositivos_especiales:
-        print(f"El dispositivo {dispositivo} no se encuentran las etiqeutas impresas en otros idiomas.")
+        print(f"El dispositivo {dispositivo} no se encuentran las etiquetas impresas en otros idiomas.")
         return None
 
     idiomas_dispositivo  = os.listdir(RUTA_ETIQUETAS + dispositivo +'/')
@@ -2185,11 +2132,13 @@ def obtener_requisitos_especiales(dispositivo, ns_ini, ns_final):
         if "IT" in idioma:
             txt_pais = "ITALIANO"
 
-        excel = obtener_unico_excel(RUTA_ETIQUETAS + dispositivo +'/'+ idioma +'/')
+        excel = obtener_unico_excel(RUTA_ETIQUETAS + dispositivo +'/'+ idioma +'/') # En caso de haber + d 1 excel peta
         df_etiquetas = pd.read_excel(excel)
-        numeros_serie = df_etiquetas["SN"].tolist()
+        numeros_serie = [str(sn)[-4:]for sn in df_etiquetas["SN"].tolist()]
+        # print(numeros_serie)
+        print(ns_ini,ns_final)
         requisitos_idioma = convertir_lista_en_rangos(ns_ini, ns_final, numeros_serie, txt_pais)
-
+        print(requisitos_idioma)
         if requisitos_idioma:
             requisitos.append(requisitos_idioma)
 
@@ -2198,23 +2147,68 @@ def obtener_requisitos_especiales(dispositivo, ns_ini, ns_final):
         for sublista in requisitos
         for diccionario in sublista
     ]
-    print(f"Requisitos especiales encontrados para {dispositivo}:")
-    print(lista_final)
+    # print(f"Requisitos especiales encontrados para {dispositivo}:")
+    # print(lista_final)
 
-    if dispositivo in "EPTEV02DEV01":
-        pre = "EPB1"
-    elif dispositivo in "EPTEV02DEV02":
-        pre = "EPB2"
-    elif dispositivo in "EPTEV01DEV01":
-        pre = "EP1"
-    elif dispositivo in "EPTEV01DEV02":
-        pre = "EP2"
-    else:
-        pre = ""
+    # if dispositivo in "EPTEV02DEV01":
+    #     pre = "EPB1"
+    # elif dispositivo in "EPTEV02DEV02":
+    #     pre = "EPB2"
+    # elif dispositivo in "EPTEV01DEV01":
+    #     pre = "EP1"
+    # elif dispositivo in "EPTEV01DEV02":
+    #     pre = "EP2"
+    # else:
+    #     pre = ""
+
+    # Como trabajamos unicamente con los ultimos 4 digitos necesitamos recuperar el numero de serie completo
+    ruta_carpeta_articulo =  Path(RUTA_IMD + dispositivo +'/')
+    df_resumen, _, _ = leer_excel_resumen(ruta_carpeta_articulo)
+    print(df_resumen)
+    numeros_serie_completos = (df_resumen["NUMERO_SERIE"].dropna().astype(str).unique().tolist())
+
+    def buscar_numero_serie_completo(ns_incompleto, lista_completos):
+
+        # Nos quedamos con XXXX
+        xxxx = str(ns_incompleto).strip()[-4:]
+
+        coincidencias = []
+
+        for ns in lista_completos:
+
+            ns = str(ns).strip()
+
+            # Por si Excel ha generado "EPB1260780.0"
+            if ns.endswith(".0"):
+                ns = ns[:-2]
+
+            if ns[-4:] == xxxx:
+                coincidencias.append(ns)
+
+        if len(coincidencias) == 0:
+            raise ValueError(
+                f"No se ha encontrado el NS completo para {ns_incompleto} en el resumen de la orden de producción del artículo {dispositivo}."
+            )
+
+        if len(coincidencias) > 1:
+            raise ValueError(
+                f"Hay varios NS completos para {ns_incompleto}: "
+                f"{coincidencias}"
+            )
+
+        return coincidencias[0]
 
     for item in lista_final:
-        item["inicio"] = pre + item["inicio"]
-        item["final"] = pre + item["final"]
+
+        item["inicio"] = buscar_numero_serie_completo(
+            item["inicio"],
+            numeros_serie_completos,
+        )
+
+        item["final"] = buscar_numero_serie_completo(
+            item["final"],
+            numeros_serie_completos,
+        )
             
     return lista_final
 
@@ -2224,14 +2218,14 @@ dic_config = leer_configuracion()
 if __name__ == "__main__":
 
 
-    rec = obtener_requisitos_especiales("EPTEV02DEV01","260780","260916")
+    rec = obtener_requisitos_especiales("EPTEV02DEV02","0000","0575")
 
     bachredord = GeneradorBatchRecord("BATCH_RECORD_EPTE.pdf")
-    bachredord.crear_portada(
+    bachredord.page_crear_portada(
 
         lote="XXXX",
 
-        dispositivo="EPTEV02DEV01",
+        dispositivo="EPTEV02DEV02",
 
         ns_inicio="EPB1230001",
         ns_final="EPB1230090",
@@ -2253,11 +2247,37 @@ if __name__ == "__main__":
         fecha_revisado="2024/02/15",
         fecha_aprobado="2024/02/15",
     )
+    bachredord.page_crear_portada2(
 
+        lote="XXXX",
+
+        dispositivo="EPTEV02DEV02",
+
+        ns_inicio="EPB1230001",
+        ns_final="EPB1230090",
+
+        software_version="4643_3385",
+
+        requisitos_especiales=rec,
+
+        preparado_por="Victoria E. González Gutiérrez",
+        cargo_preparado="Regulatory Responsible",
+
+        revisado_por="Victoria E. González Gutiérrez",
+        cargo_revisado="Quality Manager",
+
+        aprobado_por="Josep Oliver Garcia",
+        cargo_aprobado="Manager",
+
+        fecha_preparado="2024/02/15",
+        fecha_revisado="2024/02/15",
+        fecha_aprobado="2024/02/15",
+    )
+    bachredord.page_crear_indice()
     bachredord.guardar()
 
     # articulos_IMD = os.listdir(RUTA_IMD)      # Todos los articulos 
-    # # articulos_IMD = ['EPTEV02DEV02']        # Elegir manualmente los articulos
+    # # articulos_IMD = ['EPTEV02DEV01']        # Elegir manualmente los articulos
 
     # articulos_procesados = [] # Lista que contiene los articulos ya procesados
     # articulos_pendientes = articulos_IMD.copy()
