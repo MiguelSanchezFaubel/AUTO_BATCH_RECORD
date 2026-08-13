@@ -19,13 +19,18 @@ from pathlib import Path
 import unicodedata
 import pythoncom
 import win32com.client as win32
+from openpyxl import load_workbook
+from openpyxl.styles import Alignment,Font, Alignment
+from openpyxl.utils import get_column_letter
+from openpyxl.cell.cell import MergedCell
+
 
 from pdf_gen import *
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ "COMPILACION" ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 
-MODO_RESET = True # Este modo recalcula todos los resumenes a partir de las ordenes de produccion desde 0
-GENERAR_PDF_ORDENES = False # True genera las ordenes, false no las genera
+MODO_RESET = False # Este modo recalcula todos los resumenes a partir de las ordenes de produccion desde 0
+GENERAR_PDF_ORDENES = True # True genera las ordenes, false no las genera
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ CONSTANTES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 
@@ -1933,23 +1938,6 @@ def leer_excel_resumen(directorio_articulo):
 
     return  df_resumen , ordenes_produccion, ruta_resumen
 
-# def busca_albaran_pdf(nombre_albaran, articulo):
-#     """
-
-#     """
-
-#     # ruta_carpeta_articulo = Path(RUTA_IMD) / articulo
-
-#     # patron_albaran = re.compile(
-#     #     rf"(?i).*{re.escape(nombre_albaran)}.*\.pdf$"
-#     # )
-
-#     # for archivo in ruta_carpeta_articulo.iterdir():
-#     #     if archivo.is_file() and patron_albaran.fullmatch(archivo.name):
-#     #         return archivo
-
-#     return None
-
 def obtener_ordenes_por_procesar(
     ordenes_produccion_excel,
     ordenes_procesadas
@@ -2147,19 +2135,6 @@ def obtener_requisitos_especiales(dispositivo, ns_ini, ns_final):
         for sublista in requisitos
         for diccionario in sublista
     ]
-    # print(f"Requisitos especiales encontrados para {dispositivo}:")
-    # print(lista_final)
-
-    # if dispositivo in "EPTEV02DEV01":
-    #     pre = "EPB1"
-    # elif dispositivo in "EPTEV02DEV02":
-    #     pre = "EPB2"
-    # elif dispositivo in "EPTEV01DEV01":
-    #     pre = "EP1"
-    # elif dispositivo in "EPTEV01DEV02":
-    #     pre = "EP2"
-    # else:
-    #     pre = ""
 
     # Como trabajamos unicamente con los ultimos 4 digitos necesitamos recuperar el numero de serie completo
     ruta_carpeta_articulo =  Path(RUTA_IMD + dispositivo +'/')
@@ -2200,10 +2175,7 @@ def obtener_requisitos_especiales(dispositivo, ns_ini, ns_final):
 
     for item in lista_final:
 
-        item["inicio"] = buscar_numero_serie_completo(
-            item["inicio"],
-            numeros_serie_completos,
-        )
+        item["inicio"] = buscar_numero_serie_completo(item["inicio"],numeros_serie_completos,)
 
         item["final"] = buscar_numero_serie_completo(
             item["final"],
@@ -2212,160 +2184,2064 @@ def obtener_requisitos_especiales(dispositivo, ns_ini, ns_final):
             
     return lista_final
 
+def filtrar_filas_entre_valores(df,columna_filtro,valor_inicio,valor_final):
+    """
+    Devuelve df de las filas comprendidas entre la primera aparición
+    de valor_inicio y la primera aparición posterior de valor_final,
+    incluyendo ambas filas.
+    """
+
+    # Buscar índice de inicio la posciion donde se cumple que se encuentra el valor inicial
+    indices_inicio = df.index[df[columna_filtro] == valor_inicio].tolist()
+
+    if not indices_inicio:
+        raise ValueError(
+            f"No se ha encontrado el valor inicial: {valor_inicio}"
+        )
+
+    indice_inicio = indices_inicio[0] # Nos quedamos con la primera aparicion
+
+    # Buscar valor final a partir del inicio
+    indices_final = df.index[(df[columna_filtro] == valor_final)& (df.index >= indice_inicio)].tolist()
+
+    if not indices_final:
+        raise ValueError(
+            f"No se ha encontrado el valor final: {valor_final}"
+        )
+
+    indice_final = indices_final[-1] # Nos quedamos con la ultima aparicion
+
+    # Filtrar incluyendo ambas filas
+    return df.loc[indice_inicio:indice_final].copy()
+
+def formatear_resumen_excel(ruta_excel, ruta_salida=None, hoja=None):
+    """
+    Formatea el Excel resumen agrupando visualmente la información.
+
+    Operaciones realizadas
+    ----------------------
+    1. Busca la columna "ORDEN DE PRODUCCION".
+    2. Combina las filas consecutivas que tengan la misma OP.
+    3. Suma las UNIDADES correspondientes a cada OP.
+    4. Combina las celdas de UNIDADES del mismo bloque y muestra
+       únicamente el total.
+    5. Combina las celdas consecutivas de EPTEV02DEV01_PNT
+       cuando tengan el mismo valor.
+
+    Las combinaciones se realizan únicamente sobre valores consecutivos.
+    Si un mismo valor aparece nuevamente más adelante, separado por otro
+    valor distinto, se considera un bloque diferente.
+
+    Parámetros
+    ----------
+    ruta_excel : str | Path
+        Excel de entrada.
+
+    ruta_salida : str | Path, opcional
+        Excel que se generará. Si no se indica, se crea un archivo
+        con sufijo "_FORMATEADO".
+
+    hoja : str, opcional
+        Nombre de la hoja. Si no se indica se utiliza la hoja activa.
+
+    Returns
+    -------
+    Path
+        Ruta del Excel generado.
+    """
+
+    ruta_excel = Path(ruta_excel)
+
+    # ========================================================
+    # RUTA DE SALIDA
+    # ========================================================
+
+    if ruta_salida is None:
+
+        ruta_salida = ruta_excel.with_name(ruta_excel.stem+ "_FORMATEADO"+ ruta_excel.suffix)
+
+    else:
+
+        ruta_salida = Path(ruta_salida)
+
+    # ========================================================
+    # ABRIR EXCEL
+    # ========================================================
+
+    wb = load_workbook(ruta_excel)
+
+    if hoja is None:
+        ws = wb.active
+    else:
+        ws = wb[hoja]
+
+    # ========================================================
+    # LOCALIZAR COLUMNAS POR NOMBRE
+    # ========================================================
+
+    columnas = {}
+
+    for celda in ws[1]:
+
+        if celda.value is not None:
+
+            columnas[
+                str(celda.value).strip()
+            ] = celda.column
+
+    # Admitimos ambos nombres por si cambia el Excel
+    if "ORDEN DE PRODUCCION (OP)" in columnas:
+
+        col_op = columnas["ORDEN DE PRODUCCION (OP)"]
+
+    elif "ORDEN DE PRODUCCION" in columnas:
+
+        col_op = columnas["ORDEN DE PRODUCCION"]
+
+    else:
+
+        raise ValueError(
+            "No se encuentra la columna "
+            "'ORDEN DE PRODUCCION'."
+        )
+
+    if "UNIDADES" not in columnas:
+
+        raise ValueError(
+            "No se encuentra la columna 'UNIDADES'."
+        )
+
+    if "EPTEV02DEV01_PNT" not in columnas:
+
+        raise ValueError(
+            "No se encuentra la columna "
+            "'EPTEV02DEV01_PNT'."
+        )
+
+    col_unidades = columnas["UNIDADES"]
+    # ------------------------------------------------------------
+    # NUMERO DE SERIE
+    # ------------------------------------------------------------
+
+    if "NUMERO_SERIE" in columnas:
+
+        col_ns = columnas["NUMERO_SERIE"]
+
+    elif "NUMERO DE SERIE" in columnas:
+
+        col_ns = columnas["NUMERO DE SERIE"]
+
+    else:
+
+        raise ValueError(
+            "No se encuentra la columna "
+            "'NUMERO_SERIE' ni 'NUMERO DE SERIE'."
+        )
+
+    col_pnt = columnas["EPTEV02DEV01_PNT"]
+
+    primera_fila = 2
+    ultima_fila = ws.max_row
+
+    # ============================================================
+    # FUNCIONES AUXILIARES
+    # ============================================================
+    
+    def combinar_rangos_repetidos_final(ws,bloques_op):
+        """
+        Une rangos consecutivos que tengan el mismo valor,
+        únicamente en columnas:
+
+            *_LOTE
+            *_ALBARAN
+            *_PNT
+
+        La función trabaja sobre el Excel YA FORMATEADO, por lo que
+        tiene en cuenta celdas que ya están combinadas.
+
+        Ejemplo:
+
+            L348:L357 = "ALBARAN 1"
+            L358:L362 = "ALBARAN 1"
+
+        se convierte en:
+
+            L348:L362 = "ALBARAN 1"
+
+        Nunca combina entre dos órdenes de producción diferentes.
+        """
+
+        # --------------------------------------------------------
+        # Normalizar valor
+        # --------------------------------------------------------
+
+        def normalizar(valor):
+
+            if valor is None:
+                return ""
+
+            return str(valor).strip()
+
+
+        # ========================================================
+        # LOCALIZAR COLUMNAS A PROCESAR
+        # ========================================================
+
+        columnas_objetivo = []
+
+        for columna in range(
+            1,
+            ws.max_column + 1
+        ):
+
+            cabecera = ws.cell(
+                row=1,
+                column=columna
+            ).value
+
+            if cabecera is None:
+                continue
+
+            cabecera_normalizada = (
+                str(cabecera)
+                .strip()
+                .upper()
+                .replace(" ", "")
+            )
+
+            if (
+                cabecera_normalizada.endswith("_LOTE")
+                or
+                cabecera_normalizada.endswith("_ALBARAN")
+                or
+                cabecera_normalizada.endswith("_PNT")
+            ):
+
+                columnas_objetivo.append(
+                    columna
+                )
+
+
+        numero_combinaciones = 0
+
+
+        # ========================================================
+        # PROCESAR OP POR OP
+        # ========================================================
+
+        for (
+            inicio_op,
+            final_op,
+            valor_op
+        ) in bloques_op:
+
+
+            # ====================================================
+            # PROCESAR CADA COLUMNA
+            # ====================================================
+
+            for columna in columnas_objetivo:
+
+
+                # ------------------------------------------------
+                # Obtener los rangos combinados existentes
+                # de ESTA columna y ESTA OP
+                # ------------------------------------------------
+
+                rangos_columna = [
+
+                    rango
+
+                    for rango in ws.merged_cells.ranges
+
+                    if (
+                        rango.min_col == columna
+                        and
+                        rango.max_col == columna
+                        and
+                        rango.max_row >= inicio_op
+                        and
+                        rango.min_row <= final_op
+                    )
+                ]
+
+
+                rangos_columna.sort(
+                    key=lambda r: r.min_row
+                )
+
+
+                # ------------------------------------------------
+                # Crear mapa:
+                #
+                # fila -> rango combinado
+                # ------------------------------------------------
+
+                rango_por_fila = {}
+
+                for rango in rangos_columna:
+
+                    for fila in range(
+                        max(rango.min_row, inicio_op),
+                        min(rango.max_row, final_op) + 1
+                    ):
+
+                        rango_por_fila[
+                            fila
+                        ] = rango
+
+
+                # =================================================
+                # CONSTRUIR SEGMENTOS
+                # =================================================
+                #
+                # Un segmento puede ser:
+                #
+                #   fila 350
+                #
+                # o
+                #
+                #   rango 350:360
+                #
+                # =================================================
+
+                segmentos = []
+
+                fila = inicio_op
+
+
+                while fila <= final_op:
+
+                    rango = rango_por_fila.get(
+                        fila
+                    )
+
+
+                    # ---------------------------------------------
+                    # CELDA YA COMBINADA
+                    # ---------------------------------------------
+
+                    if rango is not None:
+
+                        # Solo procesamos desde el comienzo
+                        # del rango
+                        if fila != rango.min_row:
+
+                            fila = (
+                                rango.max_row + 1
+                            )
+
+                            continue
+
+
+                        valor = ws.cell(
+                            row=rango.min_row,
+                            column=columna
+                        ).value
+
+
+                        segmentos.append(
+                            {
+                                "inicio": rango.min_row,
+                                "final": rango.max_row,
+                                "valor": valor
+                            }
+                        )
+
+
+                        fila = (
+                            rango.max_row + 1
+                        )
+
+
+                    # ---------------------------------------------
+                    # CELDA NORMAL
+                    # ---------------------------------------------
+
+                    else:
+
+                        valor = ws.cell(
+                            row=fila,
+                            column=columna
+                        ).value
+
+
+                        segmentos.append(
+                            {
+                                "inicio": fila,
+                                "final": fila,
+                                "valor": valor
+                            }
+                        )
+
+
+                        fila += 1
+
+
+                # =================================================
+                # BUSCAR SEGMENTOS CONSECUTIVOS IGUALES
+                # =================================================
+
+                i = 0
+
+
+                while i < len(segmentos):
+
+                    segmento = segmentos[i]
+
+                    valor_actual = normalizar(
+                        segmento["valor"]
+                    )
+
+
+                    # ---------------------------------------------
+                    # No agrupar vacíos
+                    # ---------------------------------------------
+
+                    if valor_actual == "":
+
+                        i += 1
+                        continue
+
+
+                    inicio_grupo = (
+                        segmento["inicio"]
+                    )
+
+                    final_grupo = (
+                        segmento["final"]
+                    )
+
+                    valor_original = (
+                        segmento["valor"]
+                    )
+
+
+                    j = i + 1
+
+
+                    # ---------------------------------------------
+                    # Buscar todos los siguientes rangos
+                    # inmediatamente consecutivos y con
+                    # exactamente el mismo valor
+                    # ---------------------------------------------
+
+                    while j < len(segmentos):
+
+                        siguiente = segmentos[j]
+
+
+                        # Tiene que empezar justo debajo
+                        if (
+                            siguiente["inicio"]
+                            != final_grupo + 1
+                        ):
+                            break
+
+
+                        # Tiene que tener el mismo valor
+                        if (
+                            normalizar(
+                                siguiente["valor"]
+                            )
+                            != valor_actual
+                        ):
+                            break
+
+
+                        # Ampliamos el grupo
+                        final_grupo = (
+                            siguiente["final"]
+                        )
+
+                        j += 1
+
+
+                    # =================================================
+                    # SI HEMOS ENCONTRADO MÁS DE UN SEGMENTO
+                    # =================================================
+
+                    if j > i + 1:
+
+
+                        # ---------------------------------------------
+                        # Buscar merges antiguos incluidos dentro
+                        # del nuevo rango
+                        # ---------------------------------------------
+
+                        rangos_a_descombinar = []
+
+
+                        for rango in list(
+                            ws.merged_cells.ranges
+                        ):
+
+                            if (
+                                rango.min_col == columna
+                                and
+                                rango.max_col == columna
+                                and
+                                rango.min_row >= inicio_grupo
+                                and
+                                rango.max_row <= final_grupo
+                            ):
+
+                                rangos_a_descombinar.append(
+                                    str(rango)
+                                )
+
+
+                        # ---------------------------------------------
+                        # Eliminar los merges pequeños
+                        # ---------------------------------------------
+
+                        for rango in rangos_a_descombinar:
+
+                            ws.unmerge_cells(
+                                rango
+                            )
+
+
+                        # ---------------------------------------------
+                        # Restaurar valor en primera celda
+                        # ---------------------------------------------
+
+                        ws.cell(
+                            row=inicio_grupo,
+                            column=columna
+                        ).value = valor_original
+
+
+                        # ---------------------------------------------
+                        # Crear merge definitivo
+                        # ---------------------------------------------
+
+                        ws.merge_cells(
+                            start_row=inicio_grupo,
+                            start_column=columna,
+                            end_row=final_grupo,
+                            end_column=columna
+                        )
+
+
+                        numero_combinaciones += 1
+
+
+                        i = j
+
+
+                    else:
+
+                        i += 1
+
+
+        print(
+            "Rangos repetidos consolidados:",
+            numero_combinaciones
+        )
+        
+    def combinar_filas_adicionales_por_numero_serie(ws,bloques_op):
+        """
+        Procesa las filas adicionales generadas cuando un mismo
+        NUMERO_SERIE ocupa varias filas.
+
+        Para cada bloque de NUMERO_SERIE repetido:
+
+        1. Combina NUMERO_SERIE.
+        2. Combina SIEMPRE todas las columnas cuya cabecera
+        contenga "PCB".
+        3. Para el resto de columnas:
+        - si la fila adicional está vacía,
+            se combina con la celda superior;
+        - si contiene información, se conserva.
+        4. Nunca se combinan filas pertenecientes a OP diferentes.
+        """
+
+        # ========================================================
+        # FUNCIONES AUXILIARES
+        # ========================================================
+
+        def es_vacio(valor):
+            return (
+                valor is None
+                or str(valor).strip() == ""
+            )
+
+
+        def normalizar(valor):
+
+            if valor is None:
+                return ""
+
+            return str(valor).strip()
+
+
+        # ========================================================
+        # LOCALIZAR COLUMNAS
+        # ========================================================
+
+        columnas = {}
+
+        for celda in ws[1]:
+
+            if celda.value is None:
+                continue
+
+            nombre = str(
+                celda.value
+            ).strip()
+
+            columnas[
+                nombre.upper()
+            ] = celda.column
+
+
+        # --------------------------------------------------------
+        # NUMERO_SERIE
+        # --------------------------------------------------------
+
+        if "NUMERO_SERIE" in columnas:
+
+            col_ns = columnas[
+                "NUMERO_SERIE"
+            ]
+
+        elif "NUMERO DE SERIE" in columnas:
+
+            col_ns = columnas[
+                "NUMERO DE SERIE"
+            ]
+
+        else:
+
+            raise ValueError(
+                "No se encuentra la columna NUMERO_SERIE."
+            )
+
+
+        # ========================================================
+        # LOCALIZAR TODAS LAS COLUMNAS PCB
+        # ========================================================
+
+        columnas_pcb = []
+
+        for columna in range(
+            1,
+            ws.max_column + 1
+        ):
+
+            cabecera = ws.cell(
+                row=1,
+                column=columna
+            ).value
+
+            if cabecera is None:
+                continue
+
+            cabecera_normalizada = (
+                str(cabecera)
+                .strip()
+                .upper()
+                .replace(" ", "")
+            )
+
+            if "PCB" in cabecera_normalizada:
+
+                columnas_pcb.append(
+                    columna
+                )
+
+
+        # ========================================================
+        # FUNCIÓN PARA BUSCAR MERGE EXISTENTE
+        # ========================================================
+
+        def obtener_rango_combinado(
+            fila,
+            columna
+        ):
+
+            for rango in list(
+                ws.merged_cells.ranges
+            ):
+
+                if (
+                    rango.min_row <= fila <= rango.max_row
+                    and
+                    rango.min_col <= columna <= rango.max_col
+                ):
+
+                    return rango
+
+            return None
+
+
+        # ========================================================
+        # AMPLIAR CELDA VACÍA CON LA SUPERIOR
+        # ========================================================
+
+        def combinar_vacio_con_superior(
+            fila,
+            columna
+        ):
+
+            # Si la celda ya está combinada,
+            # no hacemos nada
+            if obtener_rango_combinado(
+                fila,
+                columna
+            ) is not None:
+
+                return
+
+
+            fila_superior = fila - 1
+
+
+            # ----------------------------------------------------
+            # ¿La superior ya pertenece a un merge?
+            # ----------------------------------------------------
+
+            rango_superior = obtener_rango_combinado(
+                fila_superior,
+                columna
+            )
+
+
+            if rango_superior is not None:
+
+                # Solo podemos ampliar si es un merge
+                # vertical de ESTA columna
+                if (
+                    rango_superior.min_col == columna
+                    and
+                    rango_superior.max_col == columna
+                    and
+                    rango_superior.max_row == fila_superior
+                ):
+
+                    fila_inicio = (
+                        rango_superior.min_row
+                    )
+
+                    valor = ws.cell(
+                        row=fila_inicio,
+                        column=columna
+                    ).value
+
+                    # Si arriba existe realmente información
+                    if not es_vacio(valor):
+
+                        ws.unmerge_cells(
+                            str(rango_superior)
+                        )
+
+                        ws.merge_cells(
+                            start_row=fila_inicio,
+                            start_column=columna,
+                            end_row=fila,
+                            end_column=columna
+                        )
+
+                return
+
+
+            # ----------------------------------------------------
+            # Celda superior normal
+            # ----------------------------------------------------
+
+            celda_superior = ws.cell(
+                row=fila_superior,
+                column=columna
+            )
+
+
+            if es_vacio(
+                celda_superior.value
+            ):
+                return
+
+
+            ws.merge_cells(
+                start_row=fila_superior,
+                start_column=columna,
+                end_row=fila,
+                end_column=columna
+            )
+
+
+        # ========================================================
+        # PRIMERO DETECTAR TODOS LOS BLOQUES DE NS REPETIDOS
+        #
+        # IMPORTANTE:
+        # Los detectamos ANTES de empezar a hacer merges.
+        # ========================================================
+
+        bloques_ns_repetidos = []
+
+
+        for (
+            inicio_op,
+            final_op,
+            valor_op
+        ) in bloques_op:
+
+
+            fila = inicio_op
+
+
+            while fila <= final_op:
+
+                valor_ns = ws.cell(
+                    row=fila,
+                    column=col_ns
+                ).value
+
+
+                if es_vacio(valor_ns):
+
+                    fila += 1
+                    continue
+
+
+                ns = normalizar(
+                    valor_ns
+                )
+
+
+                inicio_ns = fila
+                final_ns = fila
+
+
+                siguiente = fila + 1
+
+
+                while siguiente <= final_op:
+
+                    valor_siguiente = ws.cell(
+                        row=siguiente,
+                        column=col_ns
+                    ).value
+
+
+                    if es_vacio(
+                        valor_siguiente
+                    ):
+
+                        break
+
+
+                    if normalizar(
+                        valor_siguiente
+                    ) != ns:
+
+                        break
+
+
+                    final_ns = siguiente
+
+                    siguiente += 1
+
+
+                # ------------------------------------------------
+                # Solo guardar si está repetido
+                # ------------------------------------------------
+
+                if final_ns > inicio_ns:
+
+                    bloques_ns_repetidos.append(
+                        (
+                            inicio_ns,
+                            final_ns,
+                            ns
+                        )
+                    )
+
+
+                fila = final_ns + 1
+
+
+        # ========================================================
+        # PROCESAR LOS BLOQUES DETECTADOS
+        # ========================================================
+
+        for (
+            inicio_ns,
+            final_ns,
+            ns
+        ) in bloques_ns_repetidos:
+
+
+            # ====================================================
+            # 1. COMBINAR NUMERO_SERIE
+            # ====================================================
+
+            ws.merge_cells(
+                start_row=inicio_ns,
+                start_column=col_ns,
+                end_row=final_ns,
+                end_column=col_ns
+            )
+
+
+            # ====================================================
+            # 2. COMBINAR SIEMPRE TODAS LAS COLUMNAS PCB
+            # ====================================================
+
+            for col_pcb in columnas_pcb:
+
+                # -----------------------------------------------
+                # Obtener el valor PCB.
+                #
+                # Normalmente estará en todas las filas,
+                # pero buscamos el primer valor no vacío.
+                # -----------------------------------------------
+
+                valor_pcb = None
+
+
+                for fila_pcb in range(
+                    inicio_ns,
+                    final_ns + 1
+                ):
+
+                    valor = ws.cell(
+                        row=fila_pcb,
+                        column=col_pcb
+                    ).value
+
+
+                    if not es_vacio(valor):
+
+                        valor_pcb = valor
+
+                        break
+
+
+                # -----------------------------------------------
+                # Si hubiera algún merge previo dentro de este
+                # bloque PCB, lo quitamos antes de crear el
+                # merge definitivo.
+                # -----------------------------------------------
+
+                rangos_a_eliminar = []
+
+
+                for rango in list(
+                    ws.merged_cells.ranges
+                ):
+
+                    if (
+                        rango.min_col == col_pcb
+                        and
+                        rango.max_col == col_pcb
+                        and
+                        rango.min_row >= inicio_ns
+                        and
+                        rango.max_row <= final_ns
+                    ):
+
+                        rangos_a_eliminar.append(
+                            str(rango)
+                        )
+
+
+                for rango in rangos_a_eliminar:
+
+                    ws.unmerge_cells(
+                        rango
+                    )
+
+
+                # -----------------------------------------------
+                # Restaurar valor en la primera celda
+                # -----------------------------------------------
+
+                if valor_pcb is not None:
+
+                    ws.cell(
+                        row=inicio_ns,
+                        column=col_pcb
+                    ).value = valor_pcb
+
+
+                # -----------------------------------------------
+                # COMBINAR TODO EL BLOQUE DEL NS
+                # -----------------------------------------------
+
+                ws.merge_cells(
+                    start_row=inicio_ns,
+                    start_column=col_pcb,
+                    end_row=final_ns,
+                    end_column=col_pcb
+                )
+
+
+            # ====================================================
+            # 3. RESTO DE COLUMNAS
+            # ====================================================
+
+            for fila_extra in range(
+                inicio_ns + 1,
+                final_ns + 1
+            ):
+
+
+                for columna in range(
+                    1,
+                    ws.max_column + 1
+                ):
+
+
+                    # -------------------------------------------
+                    # NUMERO_SERIE ya está tratado
+                    # -------------------------------------------
+
+                    if columna == col_ns:
+                        continue
+
+
+                    # -------------------------------------------
+                    # PCB ya está tratado
+                    # -------------------------------------------
+
+                    if columna in columnas_pcb:
+                        continue
+
+
+                    # -------------------------------------------
+                    # Si ya está combinado,
+                    # no tocarlo
+                    # -------------------------------------------
+
+                    if obtener_rango_combinado(
+                        fila_extra,
+                        columna
+                    ) is not None:
+
+                        continue
+
+
+                    celda = ws.cell(
+                        row=fila_extra,
+                        column=columna
+                    )
+
+
+                    # -------------------------------------------
+                    # Si contiene información adicional real,
+                    # la dejamos tal cual
+                    # -------------------------------------------
+
+                    if not es_vacio(
+                        celda.value
+                    ):
+
+                        continue
+
+
+                    # -------------------------------------------
+                    # Si está vacía:
+                    # pertenece visualmente a la superior
+                    # -------------------------------------------
+
+                    combinar_vacio_con_superior(
+                        fila=fila_extra,
+                        columna=columna
+                    )
+
+
+        # ========================================================
+        # INFORMACIÓN DE CONTROL
+        # ========================================================
+
+        print(
+            "Columnas PCB detectadas:",
+            [
+                ws.cell(
+                    row=1,
+                    column=c
+                ).value
+                for c in columnas_pcb
+            ]
+        )
+
+        print(
+            "Bloques de NUMERO_SERIE repetido:",
+            len(bloques_ns_repetidos)
+        )
+
+    def es_vacio(valor):
+        return (
+            valor is None
+            or str(valor).strip() == ""
+        )
+
+
+    def normalizar_valor(valor):
+        """
+        Normaliza un valor para comparar celdas.
+
+        123      -> "123"
+        " 123 "  -> "123"
+        None     -> ""
+        """
+
+        if valor is None:
+            return ""
+
+        return str(valor).strip()
+
+
+    def convertir_numero(valor, celda=None):
+        """
+        Convierte UNIDADES a número.
+
+        Admite:
+            1
+            1.0
+            "1"
+            "1,5"
+
+        Las celdas vacías se consideran 0.
+        """
+
+        if es_vacio(valor):
+            return 0
+
+        if isinstance(valor, (int, float)):
+            return valor
+
+        try:
+            return float(
+                str(valor)
+                .strip()
+                .replace(",", ".")
+            )
+
+        except ValueError:
+
+            referencia = (
+                f" en {celda.coordinate}"
+                if celda is not None
+                else ""
+            )
+
+            raise ValueError(
+                f"El valor '{valor}'{referencia} "
+                f"no puede interpretarse como unidades."
+            )
+
+
+    def limpiar_total(total):
+        """
+        Si el resultado es entero:
+            5.0 -> 5
+        """
+
+        if isinstance(total, float) and total.is_integer():
+            return int(total)
+
+        return total
+
+
+    def obtener_bloques_iguales(columna,fila_inicio,fila_final):
+        """
+        Obtiene bloques CONSECUTIVOS de valores iguales dentro
+        exclusivamente del rango de filas indicado.
+
+        Importante:
+        Nunca sale fuera de la OP actual.
+
+        Devuelve:
+            [
+                (fila_inicio, fila_final, valor),
+                ...
+            ]
+        """
+
+        bloques = []
+
+        fila = fila_inicio
+
+        while fila <= fila_final:
+
+            valor = ws.cell(
+                row=fila,
+                column=columna
+            ).value
+
+            # No combinar celdas vacías
+            if es_vacio(valor):
+                fila += 1
+                continue
+
+            valor_comparacion = normalizar_valor(valor)
+
+            inicio_bloque = fila
+            final_bloque = fila
+
+            fila += 1
+
+            while fila <= fila_final:
+
+                siguiente = ws.cell(
+                    row=fila,
+                    column=columna
+                ).value
+
+                if (
+                    es_vacio(siguiente)
+                    or normalizar_valor(siguiente)
+                    != valor_comparacion
+                ):
+                    break
+
+                final_bloque = fila
+                fila += 1
+
+            bloques.append(
+                (
+                    inicio_bloque,
+                    final_bloque,
+                    valor
+                )
+            )
+
+        return bloques
+
+
+    # ============================================================
+    # IDENTIFICAR COLUMNAS
+    # ============================================================
+
+    columnas = {}
+
+    for celda in ws[1]:
+
+        if celda.value is None:
+            continue
+
+        nombre = str(
+            celda.value
+        ).strip()
+
+        columnas[nombre] = celda.column
+
+
+    # ------------------------------------------------------------
+    # ORDEN DE PRODUCCIÓN
+    # ------------------------------------------------------------
+
+    if "ORDEN DE PRODUCCION (OP)" in columnas:
+
+        col_op = columnas[
+            "ORDEN DE PRODUCCION (OP)"
+        ]
+
+    elif "ORDEN DE PRODUCCION" in columnas:
+
+        col_op = columnas[
+            "ORDEN DE PRODUCCION"
+        ]
+
+    else:
+
+        raise ValueError(
+            "No se encuentra la columna "
+            "'ORDEN DE PRODUCCION'."
+        )
+
+
+    # ------------------------------------------------------------
+    # UNIDADES GENERALES DE LA OP
+    # ------------------------------------------------------------
+
+    if "UNIDADES" not in columnas:
+
+        raise ValueError(
+            "No se encuentra la columna 'UNIDADES'."
+        )
+
+    col_unidades = columnas["UNIDADES"]
+
+
+    # ============================================================
+    # IDENTIFICAR AUTOMÁTICAMENTE TODAS LAS COLUMNAS
+    # *_LOTE, *_UNID Y *_PNT
+    # ============================================================
+
+    columnas_lote = []
+    columnas_unid = []
+    columnas_albaran = []
+    columnas_pnt = []
+
+
+    for numero_columna in range(
+        1,
+        ws.max_column + 1
+    ):
+
+        cabecera = ws.cell(
+            row=1,
+            column=numero_columna
+        ).value
+
+        if cabecera is None:
+            continue
+
+        cabecera_normalizada = (
+            str(cabecera)
+            .strip()
+            .upper()
+            .replace(" ", "")
+        )
+
+        if cabecera_normalizada.endswith("_LOTE"):
+
+            columnas_lote.append(
+                numero_columna
+            )
+
+        elif cabecera_normalizada.endswith("_UNID"):
+
+            columnas_unid.append(
+                numero_columna
+            )
+
+        elif cabecera_normalizada.endswith("_ALBARAN"):
+
+            columnas_albaran.append(
+                numero_columna
+            )
+
+        elif cabecera_normalizada.endswith("_PNT"):
+
+            columnas_pnt.append(
+                numero_columna
+            )
+
+
+    # ============================================================
+    # COMPROBAR RELACIÓN LOTE -> UNID
+    # ============================================================
+
+    pares_lote_unid = []
+
+
+    for col_lote in columnas_lote:
+
+        col_posible_unid = col_lote + 1
+
+        if col_posible_unid > ws.max_column:
+            continue
+
+        cabecera_unid = ws.cell(
+            row=1,
+            column=col_posible_unid
+        ).value
+
+        if cabecera_unid is None:
+            continue
+
+        cabecera_unid_normalizada = (
+            str(cabecera_unid)
+            .strip()
+            .upper()
+            .replace(" ", "")
+        )
+
+        if cabecera_unid_normalizada.endswith(
+            "_UNID"
+        ):
+
+            pares_lote_unid.append(
+                (
+                    col_lote,
+                    col_posible_unid
+                )
+            )
+
+
+    # ============================================================
+    # OBTENER BLOQUES DE ÓRDENES DE PRODUCCIÓN
+    # ============================================================
+
+    primera_fila = 2
+    ultima_fila = ws.max_row
+
+    bloques_op = []
+
+    fila = primera_fila
+
+
+    while fila <= ultima_fila:
+
+        valor_op = ws.cell(
+            row=fila,
+            column=col_op
+        ).value
+
+        # Ignorar filas sin OP
+        if es_vacio(valor_op):
+
+            fila += 1
+            continue
+
+        op_comparacion = normalizar_valor(
+            valor_op
+        )
+
+        inicio_op = fila
+        final_op = fila
+
+        fila += 1
+
+
+        while fila <= ultima_fila:
+
+            siguiente_op = ws.cell(
+                row=fila,
+                column=col_op
+            ).value
+
+            if (
+                es_vacio(siguiente_op)
+                or normalizar_valor(siguiente_op)
+                != op_comparacion
+            ):
+                break
+
+            final_op = fila
+
+            fila += 1
+
+
+        bloques_op.append(
+            (
+                inicio_op,
+                final_op,
+                valor_op
+            )
+        )
+
+
+    # ============================================================
+    # PROCESAR CADA ORDEN DE PRODUCCIÓN POR SEPARADO
+    # ============================================================
+
+    for inicio_op, final_op, valor_op in bloques_op:
+
+        # ========================================================
+        # 1. SUMAR UNIDADES GENERALES DE LA OP
+        # ========================================================
+
+        total_unidades_op = 0
+
+
+        # ========================================================
+        # 1. CALCULAR UNIDADES DE LA OP
+        #    = NÚMEROS DE SERIE ÚNICOS
+        # ========================================================
+
+        numeros_serie_op = set()
+
+        for fila in range(
+            inicio_op,
+            final_op + 1
+        ):
+
+            numero_serie = ws.cell(
+                row=fila,
+                column=col_ns
+            ).value
+
+            # Ignorar celdas vacías
+            if es_vacio(numero_serie):
+                continue
+
+            # Normalizar para evitar diferencias por espacios
+            numero_serie = normalizar_valor(
+                numero_serie
+            )
+
+            numeros_serie_op.add(
+                numero_serie
+            )
+
+
+        total_unidades_op = len(
+            numeros_serie_op
+        )
+
+
+        # Escribir resultado ANTES de combinar
+        ws.cell(
+            row=inicio_op,
+            column=col_unidades
+        ).value = total_unidades_op
+
+
+        # ========================================================
+        # 2. COMBINAR ORDEN DE PRODUCCIÓN Y UNIDADES
+        # ========================================================
+
+        if final_op > inicio_op:
+
+            ws.merge_cells(
+                start_row=inicio_op,
+                start_column=col_op,
+                end_row=final_op,
+                end_column=col_op
+            )
+
+            ws.merge_cells(
+                start_row=inicio_op,
+                start_column=col_unidades,
+                end_row=final_op,
+                end_column=col_unidades
+            )
+
+
+        # Centrar
+        ws.cell(
+            row=inicio_op,
+            column=col_op
+        ).alignment = Alignment(
+            horizontal="center",
+            vertical="center",
+            wrap_text=False
+        )
+
+        ws.cell(
+            row=inicio_op,
+            column=col_unidades
+        ).alignment = Alignment(
+            horizontal="center",
+            vertical="center",
+            wrap_text=False
+        )
+
+
+        # ========================================================
+        # 3. COLUMNAS *_LOTE + *_UNID
+        # ========================================================
+
+        for col_lote, col_unid in pares_lote_unid:
+
+            # ----------------------------------------------------
+            # Localizar bloques del MISMO LOTE
+            # exclusivamente dentro de esta OP
+            # ----------------------------------------------------
+
+            bloques_lote = obtener_bloques_iguales(
+                columna=col_lote,
+                fila_inicio=inicio_op,
+                fila_final=final_op
+            )
+
+
+            for (
+                inicio_lote,
+                final_lote,
+                valor_lote
+            ) in bloques_lote:
+
+                # =================================================
+                # SUMAR UNIDADES DEL LOTE
+                # =================================================
+
+                total_unidades_lote = 0
+
+
+                for fila_lote in range(
+                    inicio_lote,
+                    final_lote + 1
+                ):
+
+                    celda_unidad = ws.cell(
+                        row=fila_lote,
+                        column=col_unid
+                    )
+
+                    total_unidades_lote += (
+                        convertir_numero(
+                            celda_unidad.value,
+                            celda_unidad
+                        )
+                    )
+
+
+                total_unidades_lote = limpiar_total(
+                    total_unidades_lote
+                )
+
+
+                # Escribir total
+                ws.cell(
+                    row=inicio_lote,
+                    column=col_unid
+                ).value = total_unidades_lote
+
+
+                # =================================================
+                # COMBINAR LOTE Y UNIDADES
+                # =================================================
+
+                if final_lote > inicio_lote:
+
+                    # Combinar LOTE
+                    ws.merge_cells(
+                        start_row=inicio_lote,
+                        start_column=col_lote,
+                        end_row=final_lote,
+                        end_column=col_lote
+                    )
+
+                    # Combinar UNIDADES
+                    ws.merge_cells(
+                        start_row=inicio_lote,
+                        start_column=col_unid,
+                        end_row=final_lote,
+                        end_column=col_unid
+                    )
+
+
+                # =================================================
+                # ALINEACIÓN
+                # =================================================
+
+                ws.cell(
+                    row=inicio_lote,
+                    column=col_lote
+                ).alignment = Alignment(
+                    horizontal="center",
+                    vertical="center",
+                    wrap_text=False
+                )
+
+                ws.cell(
+                    row=inicio_lote,
+                    column=col_unid
+                ).alignment = Alignment(
+                    horizontal="center",
+                    vertical="center",
+                    wrap_text=False
+                )
+
+        # ========================================================
+        # 4. COLUMNAS *_ALBARAN
+        # ========================================================
+
+        for col_albaran in columnas_albaran:
+
+            # Buscar albaranes iguales únicamente dentro
+            # de la ORDEN DE PRODUCCIÓN actual
+            bloques_albaran = obtener_bloques_iguales(
+                columna=col_albaran,
+                fila_inicio=inicio_op,
+                fila_final=final_op
+            )
+
+            for (
+                inicio_albaran,
+                final_albaran,
+                valor_albaran
+            ) in bloques_albaran:
+
+                # Combinar solamente si ocupa más de una fila
+                if final_albaran > inicio_albaran:
+
+                    ws.merge_cells(
+                        start_row=inicio_albaran,
+                        start_column=col_albaran,
+                        end_row=final_albaran,
+                        end_column=col_albaran
+                    )
+
+                # Centrar el valor del albarán
+                ws.cell(
+                    row=inicio_albaran,
+                    column=col_albaran
+                ).alignment = Alignment(
+                    horizontal="center",
+                    vertical="center",
+                    wrap_text=False
+                )
+        # ========================================================
+        # 5. COLUMNAS *_PNT
+        # ========================================================
+
+        for col_pnt in columnas_pnt:
+
+            bloques_pnt = obtener_bloques_iguales(
+                columna=col_pnt,
+                fila_inicio=inicio_op,
+                fila_final=final_op
+            )
+
+
+            for (
+                inicio_pnt,
+                final_pnt,
+                valor_pnt
+            ) in bloques_pnt:
+
+                if final_pnt > inicio_pnt:
+
+                    ws.merge_cells(
+                        start_row=inicio_pnt,
+                        start_column=col_pnt,
+                        end_row=final_pnt,
+                        end_column=col_pnt
+                    )
+
+
+                ws.cell(
+                    row=inicio_pnt,
+                    column=col_pnt
+                ).alignment = Alignment(
+                    horizontal="center",
+                    vertical="center",
+                    wrap_text=False
+                )
+
+    # ========================================================
+    # CORREGIR FILAS ADICIONALES GENERADAS POR
+    # COMPONENTES CON MÁS DE UN LOTE
+    # ========================================================
+
+    combinar_filas_adicionales_por_numero_serie(ws=ws,bloques_op=bloques_op)
+
+
+    # ========================================================
+    # CONSOLIDAR RANGOS REPETIDOS
+    # ========================================================
+
+    combinar_rangos_repetidos_final(ws=ws,bloques_op=bloques_op)
+
+    # ========================================================
+    # FORMATO GENERAL DE LA HOJA
+    # ========================================================
+
+    # --------------------------------------------------------
+    # 1. CABECERA EN NEGRITA Y SIN SALTO DE LÍNEA
+    # --------------------------------------------------------
+
+    for celda in ws[1]:
+
+        if celda.value is not None:
+
+            # Eliminar posibles saltos de línea existentes
+            if isinstance(celda.value, str):
+                celda.value = (
+                    celda.value
+                    .replace("\n", " ")
+                    .replace("\r", " ")
+                )
+
+            celda.font = Font(
+                name=celda.font.name or "Calibri",
+                size=celda.font.sz or 11,
+                bold=True
+            )
+
+            celda.alignment = Alignment(
+                horizontal="center",
+                vertical="center",
+                wrap_text=False
+            )
+
+
+    # --------------------------------------------------------
+    # 2. EVITAR SALTOS DE TEXTO EN TODAS LAS CELDAS
+    # --------------------------------------------------------
+
+    for fila in ws.iter_rows():
+
+        for celda in fila:
+
+            # Las celdas internas de un rango combinado no
+            # contienen datos y no necesitamos modificarlas
+            if celda.value is None:
+                continue
+
+            # Eliminar saltos de línea reales
+            if isinstance(celda.value, str):
+
+                celda.value = (
+                    celda.value
+                    .replace("\n", " ")
+                    .replace("\r", " ")
+                )
+
+            # Conservar alineación horizontal existente,
+            # pero impedir que Excel divida el texto
+            celda.alignment = Alignment(
+                horizontal=celda.alignment.horizontal,
+                vertical="center",
+                wrap_text=False
+            )
+
+
+    # --------------------------------------------------------
+    # 3. AJUSTAR AUTOMÁTICAMENTE ANCHO DE COLUMNAS
+    # --------------------------------------------------------
+
+    for numero_columna in range(1,ws.max_column + 1):
+
+        longitud_maxima = 0
+
+        letra_columna = get_column_letter(
+            numero_columna
+        )
+
+        for numero_fila in range(
+            1,
+            ws.max_row + 1
+        ):
+
+            celda = ws.cell(
+                row=numero_fila,
+                column=numero_columna
+            )
+
+            valor = celda.value
+
+            if valor is None:
+                continue
+
+            texto = str(valor)
+
+            # En caso de que haya quedado algún salto
+            texto = (
+                texto
+                .replace("\n", " ")
+                .replace("\r", " ")
+            )
+
+            longitud = len(texto)
+
+            if longitud > longitud_maxima:
+                longitud_maxima = longitud
+
+        # ----------------------------------------------------
+        # Añadir margen para que el texto no quede pegado
+        # ----------------------------------------------------
+
+        ancho = longitud_maxima + 3
+
+        ws.column_dimensions[
+            letra_columna
+        ].width = ancho
+
+    # --------------------------------------------------------
+    # 4. CENTRAR TODAS LAS CELDAS
+    # --------------------------------------------------------
+
+    alineacion_centrada = Alignment(
+        horizontal="center",
+        vertical="center",
+        wrap_text=False
+    )
+
+    for row in ws.iter_rows():
+        for cell in row:
+            if not isinstance(cell, MergedCell):
+                cell.alignment = alineacion_centrada
+    # ========================================================
+    # GUARDAR
+    # ========================================================
+
+    wb.save(
+        ruta_salida
+    )
+
+    return ruta_salida
+
 DF_PNT = leer_excel_PNTs()
 dic_config = leer_configuracion()
 
 if __name__ == "__main__":
 
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ CREAR PDF ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━═════════════════════════════════════════════════════════════════════════════┛
 
-    rec = obtener_requisitos_especiales("EPTEV02DEV02","0000","0575")
+    # rec = obtener_requisitos_especiales("EPTEV02DEV02","0000","0575")
+    # bachredord = GeneradorBatchRecord("BATCH_RECORD_EPTE.pdf")
+    # bachredord.page_crear_portada(
 
-    bachredord = GeneradorBatchRecord("BATCH_RECORD_EPTE.pdf")
-    bachredord.page_crear_portada(
+    #     lote="XXXX",
 
-        lote="XXXX",
+    #     dispositivo="EPTEV02DEV02",
 
-        dispositivo="EPTEV02DEV02",
+    #     ns_inicio="EPB1230001",
+    #     ns_final="EPB1230090",
 
-        ns_inicio="EPB1230001",
-        ns_final="EPB1230090",
+    #     software_version="4643_3385",
 
-        software_version="4643_3385",
+    #     requisitos_especiales=rec,
 
-        requisitos_especiales=rec,
+    #     preparado_por="Victoria E. González Gutiérrez",
+    #     cargo_preparado="Regulatory Responsible",
 
-        preparado_por="Victoria E. González Gutiérrez",
-        cargo_preparado="Regulatory Responsible",
+    #     revisado_por="Victoria E. González Gutiérrez",
+    #     cargo_revisado="Quality Manager",
 
-        revisado_por="Victoria E. González Gutiérrez",
-        cargo_revisado="Quality Manager",
+    #     aprobado_por="Josep Oliver Garcia",
+    #     cargo_aprobado="Manager",
 
-        aprobado_por="Josep Oliver Garcia",
-        cargo_aprobado="Manager",
-
-        fecha_preparado="2024/02/15",
-        fecha_revisado="2024/02/15",
-        fecha_aprobado="2024/02/15",
-    )
-    bachredord.page_crear_portada2(
-
-        lote="XXXX",
-
-        dispositivo="EPTEV02DEV02",
-
-        ns_inicio="EPB1230001",
-        ns_final="EPB1230090",
-
-        software_version="4643_3385",
-
-        requisitos_especiales=rec,
-
-        preparado_por="Victoria E. González Gutiérrez",
-        cargo_preparado="Regulatory Responsible",
-
-        revisado_por="Victoria E. González Gutiérrez",
-        cargo_revisado="Quality Manager",
-
-        aprobado_por="Josep Oliver Garcia",
-        cargo_aprobado="Manager",
-
-        fecha_preparado="2024/02/15",
-        fecha_revisado="2024/02/15",
-        fecha_aprobado="2024/02/15",
-    )
-    bachredord.page_crear_indice()
-    bachredord.guardar()
-
-    # articulos_IMD = os.listdir(RUTA_IMD)      # Todos los articulos 
-    # # articulos_IMD = ['EPTEV02DEV01']        # Elegir manualmente los articulos
-
-    # articulos_procesados = [] # Lista que contiene los articulos ya procesados
-    # articulos_pendientes = articulos_IMD.copy()
-
-    # for i in INDICE_ARTICULOS:
-
-    #     # print("\nProcesando los articulos de: ",i,'\n')
-
-    #     # Procesamos los articulos ordenados de menos procesado a mas procesado
-    #     for articulo in dic_config[i]:
-            
-    #         # if i  in 'DISPOSITIVOS':
-    #         #     break # No procesamos aun los dispositivos
-
-    #         # if i in 'MATERIA PRIMA N2':
-    #         #     break # No procesamos aun la materia prima de nivel 2 (Consolas)
-
-    #         # if i in 'MATERIA PRIMA N1':
-    #         #     break # No procesamos aun la materia prima de nivel 1
-
-    #         if articulo in articulos_IMD:
-    #             print("Procesando el articulo: ",articulo)
-    #             articulos_procesados.append(articulo)
-    #             articulos_pendientes.remove(articulo)
-                
-    #             ruta_carpeta_articulo =  Path(RUTA_IMD + articulo +'/')
-
-    #             normalizar_nombres_archivos(ruta_carpeta_articulo) # Normalizamos los nombres de los archivos en la carpeta del artículo
-
-    #             ordenes_produccion_excel = [
-    #                 archivo
-    #                 for archivo in ruta_carpeta_articulo.iterdir()
-    #                 if archivo.is_file()
-    #                 and archivo.suffix.lower() in (".xlsx", ".xls")
-    #                 and patron_orden_produccion.fullmatch(archivo.stem.strip())
-    #             ]
-                
-    #             ordenes_produccion_excel = ordenar_ordenes_produccion(ordenes_produccion_excel)
-
-    #             lista_dataframes_ordenes = [] # es una lista que contiene todos los dataframes de consumos de las ordenes que se van a procesar y se usar para unirlos luego al resumen
-                
-    #             # Leemos el resuemnexistente de ordnes del articulo si existe, sino lo creamos
-    #             try:
-    #                 df_resumen, ordenes_procesadas, ruta_resumen = leer_excel_resumen(ruta_carpeta_articulo)
-
-    #             except:
-                    
-    #                 print(f" \nAVISO: No se pudo leer el resumen existente en {ruta_carpeta_articulo} se va a realizar el reseteo del resumen del articulo {articulo}.\n")
-    #                 time.sleep(1)
-                    
-    #                 ordenes_procesadas = []
-    #                 df_resumen = pd.DataFrame()
-    #                 ruta_resumen = ruta_carpeta_articulo / f"{articulo}_RESUMEN.xlsx"
-
-    #             else:
-    #                 lista_dataframes_ordenes.append(df_resumen)
-                
-    #             if MODO_RESET: # Fuerza que se procesen todas las carpetas de ordenes desde 0
-    #                 lista_dataframes_ordenes = [] # Limpiamos la lista
-    #                 ordenes_procesadas = []
-    #                 ruta_resumen = ruta_carpeta_articulo / f"{articulo}_RESUMEN.xlsx"
-    #                 df_resumen = pd.DataFrame()
-                
-    #             ordenes_por_procesar = obtener_ordenes_por_procesar(ordenes_produccion_excel, ordenes_procesadas)
-    #             # print("\ordenes_por_procesar del articulo {articulo}:\n",ordenes_por_procesar)
-        
-    #             for ruta_orden_excel in ordenes_por_procesar:
-    #                 print(f"Procesando orden de producción: {ruta_orden_excel.name}...")
-                    
-    #                 df_consumos_orden = procesar_orden(ruta_orden_excel)
-
-    #                 if GENERAR_PDF_ORDENES:
-    #                     convertir_excel_a_pdf(ruta_orden_excel)
-
-    #                 if df_consumos_orden is not None: # Si no es none
-    #                     lista_dataframes_ordenes.append(df_consumos_orden)
-                
-    #             df_resumen = pd.concat(lista_dataframes_ordenes,ignore_index=True)
-
-    #             # Guardamos el dataframe en el excel resumen del artuculo
-    #             df_resumen.to_excel(ruta_resumen, index=False)
-
-    # # Guardamos el dataframe en el excel resumen del artuculo
-    # df_errores = pd.DataFrame(set(lista_errores))
-    # df_errores.to_excel(
-    #     './errores.xlsx',
-    #     index=False
+    #     fecha_preparado="2024/02/15",
+    #     fecha_revisado="2024/02/15",
+    #     fecha_aprobado="2024/02/15",
     # )
+    # bachredord.page_crear_indice()
+    # bachredord.guardar()
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ PROCESAR TRAZABILIDAD Y DOCUMENTACION ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━═════════════════════════════════════════════════════════════════════════════┛
+
+    articulos_IMD = os.listdir(RUTA_IMD)      # Todos los articulos 
+    articulos_IMD = ['EPTEV02DEV01']        # Elegir manualmente los articulos
+
+    articulos_procesados = [] # Lista que contiene los articulos ya procesados
+    articulos_pendientes = articulos_IMD.copy()
+
+    for i in INDICE_ARTICULOS:
+
+        # print("\nProcesando los articulos de: ",i,'\n')
+
+        # Procesamos los articulos ordenados de menos procesado a mas procesado
+        for articulo in dic_config[i]:
             
-    # print('\nSe han procesado los articulos:',articulos_procesados,'\n')
-    # print('\nQuedan pendientes de procesar:',articulos_pendientes,'\n')
+            # if i  in 'DISPOSITIVOS':
+            #     break # No procesamos aun los dispositivos
+
+            # if i in 'MATERIA PRIMA N2':
+            #     break # No procesamos aun la materia prima de nivel 2 (Consolas)
+
+            # if i in 'MATERIA PRIMA N1':
+            #     break # No procesamos aun la materia prima de nivel 1
+
+            if articulo in articulos_IMD:
+                print("Procesando el articulo: ",articulo)
+                articulos_procesados.append(articulo)
+                articulos_pendientes.remove(articulo)
+                
+                ruta_carpeta_articulo =  Path(RUTA_IMD + articulo +'/')
+
+                normalizar_nombres_archivos(ruta_carpeta_articulo) # Normalizamos los nombres de los archivos en la carpeta del artículo
+
+                ordenes_produccion_excel = [
+                    archivo
+                    for archivo in ruta_carpeta_articulo.iterdir()
+                    if archivo.is_file()
+                    and archivo.suffix.lower() in (".xlsx", ".xls")
+                    and patron_orden_produccion.fullmatch(archivo.stem.strip())
+                ]
+                
+                ordenes_produccion_excel = ordenar_ordenes_produccion(ordenes_produccion_excel)
+
+                lista_dataframes_ordenes = [] # es una lista que contiene todos los dataframes de consumos de las ordenes que se van a procesar y se usar para unirlos luego al resumen
+                
+                # Leemos el resuemnexistente de ordnes del articulo si existe, sino lo creamos
+                try:
+                    df_resumen, ordenes_procesadas, ruta_resumen = leer_excel_resumen(ruta_carpeta_articulo)
+
+                except:
+                    
+                    print(f" \nAVISO: No se pudo leer el resumen existente en {ruta_carpeta_articulo} se va a realizar el reseteo del resumen del articulo {articulo}.\n")
+                    time.sleep(1)
+                    
+                    ordenes_procesadas = []
+                    df_resumen = pd.DataFrame()
+                    ruta_resumen = ruta_carpeta_articulo / f"{articulo}_RESUMEN.xlsx"
+
+                else:
+                    lista_dataframes_ordenes.append(df_resumen)
+                
+                if MODO_RESET: # Fuerza que se procesen todas las carpetas de ordenes desde 0
+                    lista_dataframes_ordenes = [] # Limpiamos la lista
+                    ordenes_procesadas = []
+                    ruta_resumen = ruta_carpeta_articulo / f"{articulo}_RESUMEN.xlsx"
+                    df_resumen = pd.DataFrame()
+                
+                ordenes_por_procesar = obtener_ordenes_por_procesar(ordenes_produccion_excel, ordenes_procesadas)
+                # print("\ordenes_por_procesar del articulo {articulo}:\n",ordenes_por_procesar)
+        
+                for ruta_orden_excel in ordenes_por_procesar:
+                    # print(f"Procesando orden de producción: {ruta_orden_excel.name}...")
+                    print("\n")
+                    df_consumos_orden = procesar_orden(ruta_orden_excel)
+
+                    if GENERAR_PDF_ORDENES:
+                        ruta_pdf = str(Path(ruta_orden_excel).with_suffix(".pdf"))
+                        if not Path(ruta_pdf).exists():
+                            print(f"Generando PDF de la orden {ruta_orden_excel.name}...")
+                            convertir_excel_a_pdf(ruta_orden_excel)
+                        else:
+                            print(f"El PDF de la orden {ruta_orden_excel.name} ya existe, no se generará de nuevo.")
+
+                    if df_consumos_orden is not None: # Si no es none
+                        lista_dataframes_ordenes.append(df_consumos_orden)
+                
+                df_resumen = pd.concat(lista_dataframes_ordenes,ignore_index=True)
+
+                # Guardamos el dataframe en el excel resumen del artuculo
+                df_resumen.to_excel(ruta_resumen, index=False)
+
+    # Guardamos el dataframe en el excel resumen del artuculo
+    df_errores = pd.DataFrame(set(lista_errores))
+    df_errores.to_excel(
+        './errores.xlsx',
+        index=False
+    )
+            
+    print('\nSe han procesado los articulos:',articulos_procesados,'\n')
+    print('\nQuedan pendientes de procesar:',articulos_pendientes,'\n')
+    time.sleep(1)
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ PROCESAMOS EL BACHRECORD ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━═════════════════════════════════════════════════════════════════════════════┛
+
+    # PRIMER PEDIMOS LOS NUMEROS DE SERIE DEL BACHRECORD QUE SE QUIERE GENERAR
+    
+    # procesar = input("Quiere procesar el bachrecord de un dispositivo? (S/N): ").strip().lower() # TODO DESCOMENTAR AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    procesar = "s"# TODO BORRAR AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+
+    if procesar == "s":
+
+        # dispositivo = input("Introduzca el nombre del dispositivo: ").strip()# TODO DESCOMENTAR AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+        dispositivo = "EPTEV02DEV01"# TODO BORRAR  AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+
+        while dispositivo not in DISPOSITIVOS:
+            print(f"El dispositivo '{dispositivo}' no es válido. Los dispositivos : {', '.join(DISPOSITIVOS)}")
+            dispositivo = input("Introduzca el nombre del dispositivo: ").strip()
+
+        # Obtenemos el DataFrame del resumen de la orden de producción del dispositivo
+        ruta_carpeta_articulo =  Path(RUTA_IMD + dispositivo +'/')
+        df_resumen, _, _ = leer_excel_resumen(ruta_carpeta_articulo)
+        ns_producidos = (df_resumen["NUMERO_SERIE"].dropna().astype(str).unique().tolist())
+        
+        ns_inicio_br = "EPB1230001" # TODO BORRAR  AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+        ns_final_br = "EPB1260953" # TODO BORRAR  AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+
+        # ns_inicio_br = input("Introduzca el número de serie inicial: ").strip()
+        # while ns_inicio_br not in ns_producidos:
+        #     print(f"El número de serie '{ns_inicio_br}' no es válido. Los números de serie estan comprendidos entre: {ns_producidos[0]} y {ns_producidos[-1]}")
+        #     ns_inicio_br = input("Introduzca el número de serie inicial: ").strip()
+
+        # ns_final_br = input("Introduzca el número de serie final: ").strip()
+        # while ns_final_br not in ns_producidos or ns_final_br < ns_inicio_br:
+        #     if ns_final_br < ns_inicio_br:
+        #         print(f"El número de serie final '{ns_final_br}' no puede ser menor que el número de serie inicial '{ns_inicio_br}'.")
+        #     elif ns_final_br not in ns_producidos:
+        #         print(f"El número de serie '{ns_final_br}' no es válido. Los números de serie estan comprendidos entre: {ns_producidos[0]} y {ns_producidos[-1]}")
+        #     ns_final_br = input("Introduzca el número de serie final: ").strip()
+
+        # A PARTIR DE ESTE PUNTO YA TENEMOS EL DISPOSITIVO Y LOS NUMEROS DE SERIE QUE SE QUIEREN PROCESAR PARA EL BACHRECORD
+        df_dispoitivoBR = filtrar_filas_entre_valores(df_resumen, "NUMERO_SERIE", ns_inicio_br, ns_final_br)
+        df_dispoitivoBR.to_excel('./temp/dispositivoBR_temp.xlsx', index=False)# guardamos en excel si queremos consultar algo
+
+        formatear_resumen_excel('./temp/dispositivoBR_temp.xlsx', ruta_salida='./temp/tempfiltrado.xlsx', hoja=None)
+        print("Archivo temporal filtrado y formateado guardado en './temp/tempfiltrado.xlsx'.")
+        # FILTRAMOS EL EXCEL RESUMEN DEL DISPOSITIVO A LOS NUMEROS DE SERIE QUE NOS INTERESA
+
+    # LUEGO SE COMPRUEBA QUE LA INFORMACION ESTA COMPLETA, EN CASO CONTRARIO SE DICE QUE INFORMACION FALTA
+    # POR ULTIMO GENERAMOS EL DOCUMENTO PDF BACHREORD CON LOS NUMEROS DE SERIE SOLICITADOS

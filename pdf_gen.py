@@ -18,6 +18,10 @@ from reportlab.platypus import Table, TableStyle, Paragraph
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.pdfbase.pdfmetrics import stringWidth
 
+from pypdf import PdfReader, PdfWriter
+import os
+from pathlib import Path
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ RUTAS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 
 LOGO = './data/RESOURCES/logo_ionclinics.png'
@@ -59,6 +63,7 @@ class GeneradorBatchRecord:
         self.nombre_archivo = nombre_archivo    # El nombre del archivo es la ruta de salida tambien
         self.secciones = []                     # Secciones del documento se usa para generar el indice
         self.numero_pagina = 1                  # Contador de páginas
+        self.pagina_indice = 1                  # Indica la pagina donde debe insertarse el indice por defecto despues de la primera (la portada)
 
     def nueva_pagina(self):
         """
@@ -329,51 +334,72 @@ class GeneradorBatchRecord:
         Crea una página de índice navegable con enlaces internos
         a las secciones registradas en self.secciones.
 
+        Características:
+        - "ÍNDICE /" se muestra en negro.
+        - "INDEX" se muestra en azul.
+        - La primera letra de cada sección se muestra en mayúscula.
+        - Se añaden puntos guía entre el título y el número de página.
+        - El número de página se alinea a la derecha.
+        - Respeta el nivel jerárquico de cada sección.
+        - Cada entrada es clicable y dirige a la sección correspondiente.
+
         IMPORTANTE:
-        Esta función debe llamarse al final de la generación del documento,
-        antes de guardar el PDF, ya que utiliza la información almacenada
-        previamente mediante marcar_seccion().
-
-        Estructura esperada de self.secciones:
-
-            [
-                {
-                    "clave": "portada",
-                    "titulo": "Portada",
-                    "nivel": 0,
-                    "pagina": 1
-                },
-                {
-                    "clave": "produccion",
-                    "titulo": "Producción",
-                    "nivel": 0,
-                    "pagina": 3
-                },
-                ...
-            ]
+        Esta función debe llamarse cuando ya se hayan registrado todas
+        las secciones del documento.
         """
+        y = self.crear_cabecera(ruta_logo= LOGO, codigo="TD01-03-A6",version="01",fecha="2024-04-22")
 
         ancho, alto = self.pdf._pagesize
 
         margen_izq = 20 * mm
         margen_der = 20 * mm
 
-        y = alto - 30 * mm
+        y -= 30 * mm
 
         # ========================================================
-        # TÍTULO
+        # TÍTULO: ÍNDICE / INDEX
         # ========================================================
 
+        tamano_titulo = 18
+
+        texto_es = "ÍNDICE / "
+        texto_en = "INDEX"
+
+        # Parte española en negro
+        self.pdf.setFillColor(NEGRO)
         self.pdf.setFont(
             "Helvetica-Bold",
-            18
+            tamano_titulo
         )
 
         self.pdf.drawString(
             margen_izq,
             y,
-            "ÍNDICE / INDEX"
+            texto_es
         )
+
+        # Calcular dónde termina "ÍNDICE / "
+        ancho_texto_es = self.pdf.stringWidth(
+            texto_es,
+            "Helvetica-Bold",
+            tamano_titulo
+        )
+
+        # INDEX en azul
+        self.pdf.setFillColor(AZUL)
+        self.pdf.setFont(
+            "Helvetica-BoldOblique",
+            tamano_titulo
+        )
+
+        self.pdf.drawString(
+            margen_izq + ancho_texto_es,
+            y,
+            texto_en
+        )
+
+        # Volver a negro
+        self.pdf.setFillColor(NEGRO)
 
         y -= 15 * mm
 
@@ -383,10 +409,32 @@ class GeneradorBatchRecord:
 
         for seccion in self.secciones:
 
-            clave = seccion["clave"]
-            titulo = seccion["titulo"]
-            nivel = seccion["nivel"]
-            pagina = seccion["pagina"]
+            clave = str(seccion["clave"])
+
+            titulo = str(
+                seccion["titulo"]
+            ).strip()
+
+            nivel = int(
+                seccion["nivel"]
+            )
+
+            pagina = str(
+                seccion["pagina"]
+            )
+
+            # ----------------------------------------------------
+            # Primera letra en mayúscula
+            #
+            # No usamos .capitalize(), porque convertiría
+            # el resto del texto a minúsculas.
+            # ----------------------------------------------------
+
+            if titulo:
+                titulo = (
+                    titulo[0].upper()
+                    + titulo[1:]
+                )
 
             # ----------------------------------------------------
             # Sangría según nivel
@@ -400,26 +448,49 @@ class GeneradorBatchRecord:
             )
 
             # ----------------------------------------------------
-            # Fuente según jerarquía
+            # Fuente según nivel
             # ----------------------------------------------------
 
             if nivel == 0:
 
-                self.pdf.setFont(
-                    "Helvetica-Bold",
-                    11
-                )
+                fuente = "Helvetica-Bold"
+                tamano = 11
 
             else:
 
-                self.pdf.setFont(
-                    "Helvetica",
-                    10
-                )
+                fuente = "Helvetica"
+                tamano = 10
 
-            # ----------------------------------------------------
-            # Título
-            # ----------------------------------------------------
+            self.pdf.setFont(
+                fuente,
+                tamano
+            )
+
+            self.pdf.setFillColor(
+                NEGRO
+            )
+
+            # ====================================================
+            # POSICIÓN DEL NÚMERO DE PÁGINA
+            # ====================================================
+
+            ancho_numero_pagina = (
+                self.pdf.stringWidth(
+                    pagina,
+                    fuente,
+                    tamano
+                )
+            )
+
+            x_pagina = (
+                ancho
+                - margen_der
+                - ancho_numero_pagina
+            )
+
+            # ====================================================
+            # DIBUJAR TÍTULO
+            # ====================================================
 
             self.pdf.drawString(
                 x_titulo,
@@ -427,33 +498,72 @@ class GeneradorBatchRecord:
                 titulo
             )
 
-            # ----------------------------------------------------
-            # Número de página
-            # ----------------------------------------------------
+            # ====================================================
+            # CALCULAR PUNTOS GUÍA
+            # ====================================================
 
-            pagina_txt = str(pagina)
-
-            ancho_pagina_txt = self.pdf.stringWidth(
-                pagina_txt,
-                "Helvetica-Bold" if nivel == 0 else "Helvetica",
-                11 if nivel == 0 else 10
+            ancho_titulo = (
+                self.pdf.stringWidth(
+                    titulo,
+                    fuente,
+                    tamano
+                )
             )
 
-            x_pagina = (
-                ancho
-                - margen_der
-                - ancho_pagina_txt
+            # Comienzo de los puntos
+            x_inicio_puntos = (
+                x_titulo
+                + ancho_titulo
+                + 2 * mm
             )
+
+            # Fin de los puntos
+            x_fin_puntos = (
+                x_pagina
+                - 2 * mm
+            )
+
+            ancho_disponible_puntos = (
+                x_fin_puntos
+                - x_inicio_puntos
+            )
+
+            if ancho_disponible_puntos > 0:
+
+                ancho_punto = (
+                    self.pdf.stringWidth(
+                        ".",
+                        fuente,
+                        tamano
+                    )
+                )
+
+                numero_puntos = int(
+                    ancho_disponible_puntos
+                    / ancho_punto
+                )
+
+                puntos = "." * numero_puntos
+
+                self.pdf.drawString(
+                    x_inicio_puntos,
+                    y,
+                    puntos
+                )
+
+            # ====================================================
+            # NÚMERO DE PÁGINA
+            # ====================================================
 
             self.pdf.drawString(
                 x_pagina,
                 y,
-                pagina_txt
+                pagina
             )
 
-            # ----------------------------------------------------
-            # Enlace clicable
-            # ----------------------------------------------------
+            # ====================================================
+            # ENLACE NAVEGABLE
+            # ====================================================
 
             self.pdf.linkAbsolute(
                 contents=titulo,
@@ -468,13 +578,13 @@ class GeneradorBatchRecord:
             )
 
             # ----------------------------------------------------
-            # Siguiente línea
+            # Siguiente entrada
             # ----------------------------------------------------
 
             y -= 8 * mm
 
         # ========================================================
-        # FINALIZAR PÁGINA DE ÍNDICE
+        # FINALIZAR PÁGINA
         # ========================================================
 
         self.nueva_pagina()
@@ -990,523 +1100,147 @@ class GeneradorBatchRecord:
         # FINALIZAR PÁGINA
         # ========================================================
 
-        self.nueva_pagina()
-    def page_crear_portada2(
-        self,
-        lote,
-        dispositivo,
-        ns_inicio,
-        ns_final,
-        software_version,
-        requisitos_especiales=None,
-        preparado_por="Victoria E. González Gutiérrez",
-        cargo_preparado="Regulatory Responsible",
-        revisado_por="Victoria E. González Gutiérrez",
-        cargo_revisado="Quality Manager",
-        aprobado_por="Josep Oliver Garcia",
-        cargo_aprobado="Manager",
-        fecha_preparado="2024/02/15",
-        fecha_revisado="2024/02/15",
-        fecha_aprobado="2024/02/15",
-    ):
-        """
-        Crea la portada del Batch Record.
-
-        Parámetros
-        ----------
-        self : GeneradorBatchRecord
-            Instancia del generador de Batch Records.
-
-        lote : str
-            Número o código del lote.
-
-        ns_inicio : str
-            Número de serie inicial.
-
-        ns_final : str
-            Número de serie final.
-
-        software_version : str
-            Versión de software.
-
-        requisitos_especiales : list[dict], opcional
-            Ejemplo:
-            [
-                {
-                    "inicio": "EPB1230001",
-                    "final": "EPB1230011",
-                    "requisito": "V03 INGLES"
-                },
-                ...
-            ]
-        """
-        self.marcar_seccion("PORTADA2", "portada2", nivel=0)
-        
-        if requisitos_especiales is None:
-            requisitos_especiales = []
-
-        # --------------------------------------------------------
-        # DIMENSIONES DE PÁGINA
-        # --------------------------------------------------------
-
-        ancho, alto = A4
-
-        margen_izq = 15 * mm
-        margen_der = 15 * mm
-
-        ancho_util = ancho - margen_izq - margen_der
-
-        # ========================================================
-        # CABECERA
-        # ========================================================
-
-        y = self.crear_cabecera()
-
-        # ========================================================
-        # 1. TÍTULO
-        # ========================================================
-
-        y -= 17 * mm # MARGEN ENTRE CABECERA Y TÍTULO
-
-        self.pdf.setFillColor(NEGRO)
-        self.pdf.setFont("Helvetica-Bold", 23)
-
-        texto_1 = "LIBERACIÓN LOTES /"
-        self.pdf.drawString(margen_izq, y, texto_1)
-
-        ancho_texto_1 = stringWidth(
-            texto_1,
-            "Helvetica-Bold",
-            23
-        )
-
-        self.pdf.setFillColor(AZUL)
-        self.pdf.setFont("Helvetica-BoldOblique", 23)
-
-        self.pdf.drawString(
-            margen_izq + ancho_texto_1 + 3 * mm,
-            y,
-            "BATCH RECORDS"
-        )
-        # ========================================================
-        # 1.1 DISPOSITIVO
-        # ========================================================
-
-        y -= 16 * mm
-        texto_lote = "DISPOSITIVO /"
-        self.pdf.setFillColor(NEGRO)
-        self.pdf.setFont("Helvetica-Bold", 18)
-        self.pdf.drawString(margen_izq,y,texto_lote)
-        ancho_lote1 = stringWidth(texto_lote,"Helvetica-Bold",18)
-
-        texto_lote = " DEVICE:"
-        self.pdf.setFillColor(AZUL)
-        self.pdf.drawString(margen_izq + ancho_lote1 ,y,texto_lote)
-        ancho_lote2 = stringWidth(texto_lote,"Helvetica-Bold",18)
+        self.nueva_pagina() #
+        self.pagina_indice = self.numero_pagina # Indicamos que la pagina donde se insertara el indice es la siguiente a la portada
+        self.nueva_pagina() # Dejamos una pagina en blanco para el indice siempre despues de crear la portada
     
-
-        texto_lote = str(dispositivo).upper()
-        self.pdf.setFillColor(NEGRO)
-        self.pdf.setFont("Helvetica-Bold", 18)
-
-        self.pdf.drawString(margen_izq + ancho_lote1 + ancho_lote2 + 3 * mm, y, texto_lote)
-
-        # ========================================================
-        # 2. LOTE
-        # ========================================================
-
-        y -= 11 * mm
-
-        texto_lote = "LOTE /"
-        self.pdf.setFillColor(NEGRO)
-        self.pdf.setFont("Helvetica-Bold", 18)
-        self.pdf.drawString(margen_izq,y,texto_lote)
-        ancho_lote1 = stringWidth(texto_lote,"Helvetica-Bold",18)
-
-        texto_lote = " BATCH:"
-        self.pdf.setFillColor(AZUL)
-        self.pdf.drawString(margen_izq + ancho_lote1 ,y,texto_lote)
-        ancho_lote2 = stringWidth(texto_lote,"Helvetica-Bold",18)
-
-        self.pdf.setFillColor(NEGRO)
-        self.pdf.setFont("Helvetica-Bold", 18)
-
-        self.pdf.drawString(margen_izq + ancho_lote1 + ancho_lote2 + 3 * mm,y,str(lote))
-
-        # ========================================================
-        # 3. TABLA Nº SERIE / SOFTWARE
-        # ========================================================
-
-        y -= 22 * mm
-
-        datos_software = [
-            [
-                Paragraph("NS INICIO", estilo_cabecera),
-                Paragraph("NS FINAL", estilo_cabecera),
-                Paragraph("SOFTWARE VERSION", estilo_cabecera),
-            ],
-            [
-                Paragraph(str(ns_inicio), estilo_celda),
-                Paragraph(str(ns_final), estilo_celda),
-                Paragraph(str(software_version), estilo_celda),
-            ],
-        ]
-
-        tabla_software = Table(
-            datos_software,
-            colWidths=[
-                42 * mm,
-                42 * mm,
-                ancho_util - 84 * mm
-            ],
-            rowHeights=[
-                6 * mm,
-                6 * mm
-            ]
-        )
-
-        tabla_software.setStyle(
-            TableStyle([
-                ("GRID", (0, 0), (-1, -1), 0.5, NEGRO),
-                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 3 * mm),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 2 * mm),
-                ("TOPPADDING", (0, 0), (-1, -1), 1 * mm),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 1 * mm),
-            ])
-        )
-
-        w, h = tabla_software.wrap(ancho_util, 30 * mm)
-
-        tabla_software.drawOn(
-            self.pdf,
-            margen_izq,
-            y - h
-        )
-
-        y -= h + 16 * mm
-
-        # ========================================================
-        # 4. TABLA REQUISITOS ESPECIALES
-        # ========================================================
-
-        titulo_requisitos = Paragraph(
-            'REQUISITOS ESPECIALES / '
-            '<font color="#0070C0">'
-            '<i>SPECIAL REQUIREMENTS</i>'
-            '</font>',
-            estilo_cabecera
-        )
-
-        datos_requisitos = [
-            [
-                Paragraph("NS INICIO", estilo_cabecera),
-                Paragraph("NS FINAL", estilo_cabecera),
-                titulo_requisitos
-            ]
-        ]
-
-        for requisito in requisitos_especiales:
-
-            datos_requisitos.append([
-                Paragraph(
-                    str(requisito.get("inicio", "")),
-                    estilo_celda
-                ),
-                Paragraph(
-                    str(requisito.get("final", "")),
-                    estilo_celda
-                ),
-                Paragraph(
-                    str(requisito.get("requisito", "")),
-                    estilo_celda
-                ),
-            ])
-
-        # Si no existen requisitos, mostramos una fila vacía
-        if not requisitos_especiales:
-            datos_requisitos.append([
-                "",
-                "",
-                Paragraph(
-                    "SIN REQUISITOS ESPECIALES / "
-                    '<font color="#0070C0">'
-                    "<i>NO SPECIAL REQUIREMENTS</i>"
-                    "</font>",
-                    estilo_celda
-                )
-            ])
-
-        tabla_requisitos = Table(
-            datos_requisitos,
-            colWidths=[
-                42 * mm,
-                42 * mm,
-                ancho_util - 84 * mm
-            ],
-            rowHeights=6 * mm,
-
-            # Repetir cabecera cuando se divide la tabla
-            repeatRows=1
-        )
-
-        tabla_requisitos.setStyle(
-            TableStyle([
-                ("GRID", (0, 0), (-1, -1), 0.5, NEGRO),
-                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-                ("LEFTPADDING", (0, 0), (-1, -1), 3 * mm),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 2 * mm),
-                ("TOPPADDING", (0, 0), (-1, -1), 1 * mm),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 1 * mm),
-            ])
-        )
-
-        # DIBUJAR TABLA REQUISITOS CON PAGINACIÓN
-
-        margen_inferior = 20 * mm
-        margen_superior = 20 * mm
-
-        # Espacio disponible en la primera página
-        alto_disponible = y - margen_inferior
-
-        tabla_actual = tabla_requisitos
-
-
-        while tabla_actual:
-
-            # Dividir la tabla según el espacio disponible
-            partes = tabla_actual.split(
-                ancho_util,
-                alto_disponible
-            )
-
-            if not partes:
-                raise ValueError(
-                    "La tabla no puede dividirse en el espacio disponible."
-                )
-
-            # Primera parte que cabe en esta página
-            parte_actual = partes[0]
-
-            w, h = parte_actual.wrap(
-                ancho_util,
-                alto_disponible
-            )
-
-            parte_actual.drawOn(
-                self.pdf,
-                margen_izq,
-                y - h
-            )
-
-            # Guardamos dónde termina esta parte
-            y_fin_tabla_requisitos = y - h
-
-            # ¿QUEDA TABLA POR DIBUJAR?
-
-            if len(partes) > 1:
-
-                # La segunda parte contiene todo lo restante
-                tabla_actual = partes[1]
-
-                # Nueva página
-                self.nueva_pagina()
-
-                # Recuperar tamaño de página
-                ancho, alto = self.pdf._pagesize
-
-                # Reiniciar posición vertical
-                y = alto - margen_superior
-
-                # Nuevo espacio disponible
-                alto_disponible = (
-                    y
-                    - margen_inferior
-                )
-
-            else:
-
-                # Ya hemos terminado toda la tabla
-                tabla_actual = None
-
-        y_fin_tabla_requisitos = y - h
-
-        # ========================================================
-        # 5. BLOQUE DE FIRMAS
-        # ========================================================
-
-        y_firmas_fija = 18 * mm # Determina la posicion de la esquina inferior de las firmas a partir de la cual se crea el bloque
-
-
-        altura_firma = 51 * mm
-        altura_fecha = 7 * mm
-
-        sep_requisitos_firmas = y_fin_tabla_requisitos - 5 * mm - altura_firma - altura_fecha
-
-        if sep_requisitos_firmas < y_firmas_fija: # Si la tabla de requisitos es demasiado grande, se crea una nueva página para las firmas
-            self.nueva_pagina()
-            # y_firmas_fija = sep_requisitos_firmas
-        
-        ancho_columna = ancho_util / 3
-
-        # Coordenadas
-        x1 = margen_izq
-        x2 = margen_izq + ancho_columna
-        x3 = margen_izq + ancho_columna * 2
-        x4 = margen_izq + ancho_util
-
-        y_inferior = y_firmas_fija
-        y_fecha = y_firmas_fija + altura_fecha
-        y_superior = y_fecha + altura_firma
-
-        # --------------------------------------------------------
-        # Rectángulo exterior
-        # --------------------------------------------------------
-
-        self.pdf.setStrokeColor(NEGRO)
-        self.pdf.setLineWidth(0.5)
-
-        self.pdf.rect(
-            x1,
-            y_inferior,
-            ancho_util,
-            altura_firma + altura_fecha,
-            stroke=1,
-            fill=0
-        )
-
-        # Divisiones verticales
-        self.pdf.line(
-            x2,
-            y_inferior,
-            x2,
-            y_superior
-        )
-
-        self.pdf.line(
-            x3,
-            y_inferior,
-            x3,
-            y_superior
-        )
-
-        # Línea horizontal de fecha
-        self.pdf.line(
-            x1,
-            y_fecha,
-            x4,
-            y_fecha
-        )
-
-        # ========================================================
-        # TEXTO FIRMAS
-        # ========================================================
-
-        padding = 3 * mm
-
-        self.pdf.setFillColor(NEGRO)
-
-        # --------------------------------------------------------
-        # PREPARADO
-        # --------------------------------------------------------
-
-        self.pdf.setFont("Helvetica", 9)
-
-        self.pdf.drawString(
-            x1 + padding,
-            y_superior - 6 * mm,
-            "Prepared by:"
-        )
-
-        self.pdf.drawString(
-            x1 + padding,
-            y_superior - 12 * mm,
-            preparado_por
-        )
-
-        self.pdf.drawString(
-            x1 + padding,
-            y_superior - 18 * mm,
-            cargo_preparado
-        )
-
-        # --------------------------------------------------------
-        # REVISADO
-        # --------------------------------------------------------
-
-        self.pdf.drawString(
-            x2 + padding,
-            y_superior - 6 * mm,
-            "Revised by:"
-        )
-
-        self.pdf.drawString(
-            x2 + padding,
-            y_superior - 12 * mm,
-            revisado_por
-        )
-
-        self.pdf.drawString(
-            x2 + padding,
-            y_superior - 18 * mm,
-            cargo_revisado
-        )
-
-        # --------------------------------------------------------
-        # APROBADO
-        # --------------------------------------------------------
-
-        self.pdf.drawString(
-            x3 + padding,
-            y_superior - 6 * mm,
-            "Approved by:"
-        )
-
-        self.pdf.drawString(
-            x3 + padding,
-            y_superior - 12 * mm,
-            aprobado_por
-        )
-
-        self.pdf.drawString(
-            x3 + padding,
-            y_superior - 18 * mm,
-            cargo_aprobado
-        )
-
-        # ========================================================
-        # FECHAS
-        # ========================================================
-
-        self.pdf.setFont("Helvetica", 9)
-
-        self.pdf.drawString(
-            x1 + padding,
-            y_inferior + 2 * mm,
-            fecha_preparado
-        )
-
-        self.pdf.drawString(
-            x2 + padding,
-            y_inferior + 2 * mm,
-            fecha_revisado
-        )
-
-        self.pdf.drawString(
-            x3 + padding,
-            y_inferior + 2 * mm,
-            fecha_aprobado
-        )
-
-        # ========================================================
-        # FINALIZAR PÁGINA
-        # ========================================================
-
-        self.nueva_pagina()
-
     def guardar(self):
+        """
+        Guarda el PDF generado y mueve la última página a la posición indicada, 
+        reemplazando la página que actualmente ocupa esa posición (Ya reservada en blanco).
+        """
+        def mover_ultima_pagina_y_reemplazar(ruta_pdf,posicion):
+            """
+            Mueve la última página del PDF a la posición indicada,
+            sustituyendo la página que actualmente ocupa esa posición.
+
+            La página sustituida se elimina del documento.
+
+            Parámetros
+            ----------
+            ruta_pdf : str
+                Ruta del PDF que se desea modificar.
+
+            posicion : int
+                Número de página que se desea reemplazar.
+                La numeración comienza en 1.
+
+                Ejemplo:
+                    posicion=2
+
+                sustituye la página 2 por la última página del PDF.
+
+            Ejemplo
+            -------
+            PDF inicial:
+
+                Página 1 -> Portada
+                Página 2 -> Página reservada
+                Página 3 -> Producción
+                Página 4 -> Ensayos
+                Página 5 -> Índice
+
+            Después de:
+
+                mover_ultima_pagina_y_reemplazar(
+                    "Batch_Record.pdf",
+                    posicion=2
+                )
+
+            Resultado:
+
+                Página 1 -> Portada
+                Página 2 -> Índice
+                Página 3 -> Producción
+                Página 4 -> Ensayos
+            """
+
+            ruta_pdf = Path(ruta_pdf)
+
+            if not ruta_pdf.exists():
+                raise FileNotFoundError(
+                    f"No existe el PDF: {ruta_pdf}"
+                )
+
+            reader = PdfReader(str(ruta_pdf))
+
+            numero_paginas = len(reader.pages)
+
+            if numero_paginas < 2:
+                raise ValueError(
+                    "El PDF debe contener al menos 2 páginas."
+                )
+
+            if posicion < 1 or posicion > numero_paginas:
+                raise ValueError(
+                    f"La posición debe estar entre 1 y {numero_paginas}."
+                )
+
+            # No tendría sentido reemplazar la última página
+            # por ella misma
+            if posicion == numero_paginas:
+                return
+
+            # --------------------------------------------------------
+            # La última página es la que queremos mover
+            # --------------------------------------------------------
+
+            ultima_pagina = reader.pages[-1]
+
+            writer = PdfWriter()
+
+            # --------------------------------------------------------
+            # Recorrer todas las páginas EXCEPTO la última
+            # --------------------------------------------------------
+
+            for indice in range(numero_paginas - 1):
+
+                numero_pagina = indice + 1
+
+                # Si llegamos a la página que queremos sustituir,
+                # añadimos la última página en su lugar.
+                if numero_pagina == posicion:
+
+                    writer.add_page(
+                        ultima_pagina
+                    )
+
+                else:
+
+                    writer.add_page(
+                        reader.pages[indice]
+                    )
+
+            # --------------------------------------------------------
+            # Guardar en archivo temporal
+            # --------------------------------------------------------
+
+            ruta_temporal = ruta_pdf.with_name(
+                ruta_pdf.stem
+                + "_temp"
+                + ruta_pdf.suffix
+            )
+
+            with open(
+                ruta_temporal,
+                "wb"
+            ) as archivo:
+
+                writer.write(
+                    archivo
+                )
+
+            # --------------------------------------------------------
+            # Sustituir PDF original
+            # --------------------------------------------------------
+
+            os.replace(
+                ruta_temporal,
+                ruta_pdf
+            )
 
         self.pdf.save()
+        mover_ultima_pagina_y_reemplazar(self.nombre_archivo, self.pagina_indice)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ FUNCIONES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 
