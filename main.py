@@ -29,7 +29,7 @@ from pdf_gen import *
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ "COMPILACION" ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 
-MODO_RESET = False # Este modo recalcula todos los resumenes a partir de las ordenes de produccion desde 0
+MODO_RESET = True # Este modo recalcula todos los resumenes a partir de las ordenes de produccion desde 0
 GENERAR_PDF_ORDENES = True # True genera las ordenes, false no las genera
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ CONSTANTES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
@@ -65,6 +65,145 @@ patron_orden_produccion = re.compile(
 )
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ FUNCIONES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
+def eliminar_articulos_vacios_df(df):
+    """
+    Elimina bloques completos de artículos cuando TODAS sus columnas
+    están completamente vacías.
+
+    Estructura esperada por artículo:
+
+        ARTICULO_LOTE
+        ARTICULO_UNID
+        ARTICULO_ALBARAN
+        ARTICULO_PNT
+
+    Ejemplo:
+
+        PDB1V01_LOTE
+        PDB1V01_UNID
+        PDB1V01_ALBARAN
+        PDB1V01_PNT
+
+    Si las cuatro están vacías -> elimina las cuatro.
+    Si cualquiera tiene información -> conserva las cuatro.
+    """
+
+    df = df.copy()
+
+    # ========================================================
+    # QUÉ CONSIDERAMOS VACÍO
+    # ========================================================
+
+    def es_vacio(valor):
+
+        # NaN, None, pd.NA...
+        if pd.isna(valor):
+            return True
+
+        # Cadenas vacías o espacios
+        if isinstance(valor, str):
+            return valor.strip() == ""
+
+        return False
+
+
+    # ========================================================
+    # IDENTIFICAR COLUMNAS POR ARTÍCULO
+    # ========================================================
+
+    sufijos = [
+        "_LOTE",
+        "_UNID",
+        "_ALBARAN",
+        "_PNT"
+    ]
+
+    articulos = {}
+
+
+    for columna in df.columns:
+
+        nombre = str(columna).strip()
+
+        nombre_upper = nombre.upper()
+
+        for sufijo in sufijos:
+
+            if nombre_upper.endswith(sufijo):
+
+                # Ejemplo:
+                #
+                # PDB1V01_LOTE
+                #      ↓
+                # PDB1V01
+
+                articulo = nombre[
+                    :-len(sufijo)
+                ]
+
+                if articulo not in articulos:
+
+                    articulos[articulo] = []
+
+                articulos[articulo].append(
+                    columna
+                )
+
+                break
+
+
+    # ========================================================
+    # COMPROBAR CADA BLOQUE
+    # ========================================================
+
+    columnas_eliminar = []
+
+
+    for articulo, columnas_articulo in articulos.items():
+
+        # ----------------------------------------------------
+        # Comprobar si TODAS las celdas de TODAS las columnas
+        # del artículo están vacías
+        # ----------------------------------------------------
+
+        bloque_vacio = True
+
+
+        for columna in columnas_articulo:
+
+            for valor in df[columna]:
+
+                if not es_vacio(valor):
+
+                    bloque_vacio = False
+                    break
+
+            if not bloque_vacio:
+                break
+
+
+        # ----------------------------------------------------
+        # Si todo está vacío, eliminar el bloque completo
+        # ----------------------------------------------------
+
+        if bloque_vacio:
+
+            columnas_eliminar.extend(columnas_articulo)
+
+            print(
+                f"Artículo vacío eliminado: {articulo}"
+            )
+
+
+    # ========================================================
+    # ELIMINAR COLUMNAS
+    # ========================================================
+
+    df = df.drop(columns=columnas_eliminar)
+
+    return df
+
 def obtener_unico_excel(directorio):
     """
     Busca archivos Excel en un directorio y comprueba
@@ -2347,6 +2486,495 @@ def formatear_resumen_excel(ruta_excel, ruta_salida=None, hoja=None):
     # FUNCIONES AUXILIARES
     # ============================================================
     
+    def eliminar_columnas_vacias(ws):
+        """
+        Elimina las columnas completamente vacías.
+
+        Se considera vacía una columna si, desde la fila 2 hasta
+        la última fila con datos, todas sus celdas están vacías.
+
+        La fila 1 se considera cabecera y no se utiliza para decidir
+        si la columna contiene datos.
+        """
+
+        columnas_eliminar = []
+
+        # Recorremos de derecha a izquierda para evitar
+        # problemas al eliminar columnas
+        for columna in range(
+            ws.max_column,
+            0,
+            -1
+        ):
+
+            tiene_datos = False
+
+            for fila in range(
+                2,
+                ws.max_row + 1
+            ):
+
+                valor = ws.cell(
+                    row=fila,
+                    column=columna
+                ).value
+
+                if (
+                    valor is not None
+                    and str(valor).strip() != ""
+                ):
+
+                    tiene_datos = True
+                    break
+
+            if not tiene_datos:
+
+                columnas_eliminar.append(
+                    columna
+                )
+
+        # Eliminar de derecha a izquierda
+        for columna in columnas_eliminar:
+
+            ws.delete_cols(
+                columna,
+                1
+            )
+
+    def consolidar_lotes_y_unidades_final(ws,bloques_op,pares_lote_unid):
+        """
+        PASADA FINAL sobre el Excel ya procesado.
+
+        Para cada ORDEN DE PRODUCCIÓN y cada pareja:
+
+            *_LOTE
+            *_UNID
+
+        realiza:
+
+        1. Detecta los rangos actuales de LOTE.
+        2. Si existen rangos consecutivos con el mismo lote,
+        los considera un único bloque.
+        3. Suma TODOS los valores de *_UNID comprendidos
+        dentro del bloque del lote.
+        4. Combina la celda del LOTE para todo el bloque.
+        5. Combina la celda de UNIDADES para exactamente
+        el mismo bloque.
+        6. Nunca combina entre OP diferentes.
+
+        Está pensada para ejecutarse al FINAL, después de las
+        combinaciones anteriores.
+        """
+
+        # ========================================================
+        # FUNCIONES AUXILIARES
+        # ========================================================
+
+        def es_vacio_local(valor):
+            return (
+                valor is None
+                or str(valor).strip() == ""
+            )
+
+
+        def normalizar_local(valor):
+
+            if valor is None:
+                return ""
+
+            return str(valor).strip()
+
+
+        # ========================================================
+        # BUSCAR MERGE VERTICAL DE UNA CELDA
+        # ========================================================
+
+        def obtener_merge_vertical(
+            fila,
+            columna
+        ):
+
+            for rango in ws.merged_cells.ranges:
+
+                if (
+                    rango.min_col == columna
+                    and
+                    rango.max_col == columna
+                    and
+                    rango.min_row <= fila <= rango.max_row
+                ):
+
+                    return rango
+
+            return None
+
+
+        # ========================================================
+        # OBTENER SEGMENTOS ACTUALES DE LOTE
+        # ========================================================
+
+        def obtener_segmentos_lote(
+            col_lote,
+            inicio_op,
+            final_op
+        ):
+
+            segmentos = []
+
+            fila = inicio_op
+
+            while fila <= final_op:
+
+                # -----------------------------------------------
+                # ¿Estamos dentro de un rango combinado?
+                # -----------------------------------------------
+
+                rango = obtener_merge_vertical(
+                    fila,
+                    col_lote
+                )
+
+
+                if rango is not None:
+
+                    # Si estamos en una fila interior del merge,
+                    # saltamos directamente al final
+                    if fila != rango.min_row:
+
+                        fila = rango.max_row + 1
+                        continue
+
+
+                    inicio = max(
+                        rango.min_row,
+                        inicio_op
+                    )
+
+                    final = min(
+                        rango.max_row,
+                        final_op
+                    )
+
+                    valor = ws.cell(
+                        row=inicio,
+                        column=col_lote
+                    ).value
+
+
+                    if not es_vacio_local(valor):
+
+                        segmentos.append(
+                            {
+                                "inicio": inicio,
+                                "final": final,
+                                "valor": valor
+                            }
+                        )
+
+
+                    fila = final + 1
+                    continue
+
+
+                # -----------------------------------------------
+                # Celda normal
+                # -----------------------------------------------
+
+                valor = ws.cell(
+                    row=fila,
+                    column=col_lote
+                ).value
+
+
+                if not es_vacio_local(valor):
+
+                    segmentos.append(
+                        {
+                            "inicio": fila,
+                            "final": fila,
+                            "valor": valor
+                        }
+                    )
+
+
+                fila += 1
+
+
+            return segmentos
+
+
+        # ========================================================
+        # SUMAR LAS UNIDADES DE UN RANGO
+        # ========================================================
+
+        def sumar_unidades_rango(
+            col_unid,
+            inicio,
+            final
+        ):
+
+            total = 0
+
+
+            for fila in range(
+                inicio,
+                final + 1
+            ):
+
+                celda = ws.cell(
+                    row=fila,
+                    column=col_unid
+                )
+
+                # Las celdas interiores de un merge no contienen
+                # información real. Solo contamos las anclas.
+                if isinstance(
+                    celda,
+                    MergedCell
+                ):
+                    continue
+
+
+                if es_vacio_local(
+                    celda.value
+                ):
+                    continue
+
+
+                total += convertir_numero(
+                    celda.value,
+                    celda
+                )
+
+
+            return limpiar_total(
+                total
+            )
+
+
+        # ========================================================
+        # ELIMINAR MERGES DE UNA COLUMNA DENTRO DE UN RANGO
+        # ========================================================
+
+        def eliminar_merges_internos(
+            columna,
+            inicio,
+            final
+        ):
+
+            rangos_eliminar = []
+
+
+            for rango in list(
+                ws.merged_cells.ranges
+            ):
+
+                if (
+                    rango.min_col == columna
+                    and
+                    rango.max_col == columna
+
+                    and
+
+                    rango.min_row >= inicio
+                    and
+                    rango.max_row <= final
+                ):
+
+                    rangos_eliminar.append(
+                        str(rango)
+                    )
+
+
+            for rango in rangos_eliminar:
+
+                ws.unmerge_cells(
+                    rango
+                )
+
+
+        # ========================================================
+        # PROCESAR OP POR OP
+        # ========================================================
+
+        for (
+            inicio_op,
+            final_op,
+            valor_op
+        ) in bloques_op:
+
+
+            # ====================================================
+            # PROCESAR CADA PAREJA LOTE / UNID
+            # ====================================================
+
+            for (
+                col_lote,
+                col_unid
+            ) in pares_lote_unid:
+
+
+                # -----------------------------------------------
+                # Obtener situación ACTUAL de la columna LOTE
+                # -----------------------------------------------
+
+                segmentos = obtener_segmentos_lote(
+                    col_lote=col_lote,
+                    inicio_op=inicio_op,
+                    final_op=final_op
+                )
+
+
+                if not segmentos:
+                    continue
+
+
+                # =================================================
+                # CONSOLIDAR SEGMENTOS CONSECUTIVOS
+                # DEL MISMO LOTE
+                # =================================================
+
+                grupos = []
+
+                grupo_actual = {
+                    "inicio": segmentos[0]["inicio"],
+                    "final": segmentos[0]["final"],
+                    "valor": segmentos[0]["valor"]
+                }
+
+
+                for segmento in segmentos[1:]:
+
+                    mismo_lote = (
+                        normalizar_local(
+                            segmento["valor"]
+                        )
+                        ==
+                        normalizar_local(
+                            grupo_actual["valor"]
+                        )
+                    )
+
+
+                    consecutivo = (
+                        segmento["inicio"]
+                        ==
+                        grupo_actual["final"] + 1
+                    )
+
+
+                    if (
+                        mismo_lote
+                        and
+                        consecutivo
+                    ):
+
+                        grupo_actual["final"] = (
+                            segmento["final"]
+                        )
+
+
+                    else:
+
+                        grupos.append(
+                            grupo_actual
+                        )
+
+                        grupo_actual = {
+                            "inicio": segmento["inicio"],
+                            "final": segmento["final"],
+                            "valor": segmento["valor"]
+                        }
+
+
+                # Añadir último grupo
+                grupos.append(
+                    grupo_actual
+                )
+
+
+                # =================================================
+                # PROCESAR CADA LOTE DEFINITIVO
+                # =================================================
+
+                for grupo in grupos:
+
+                    inicio = grupo["inicio"]
+                    final = grupo["final"]
+                    valor_lote = grupo["valor"]
+
+
+                    # ---------------------------------------------
+                    # SUMAR UNIDADES ANTES DE DESHACER MERGES
+                    # ---------------------------------------------
+
+                    total_unidades = sumar_unidades_rango(
+                        col_unid=col_unid,
+                        inicio=inicio,
+                        final=final
+                    )
+
+
+                    # ---------------------------------------------
+                    # Eliminar merges antiguos del LOTE
+                    # ---------------------------------------------
+
+                    eliminar_merges_internos(
+                        columna=col_lote,
+                        inicio=inicio,
+                        final=final
+                    )
+
+
+                    # ---------------------------------------------
+                    # Eliminar merges antiguos de UNIDADES
+                    # ---------------------------------------------
+
+                    eliminar_merges_internos(
+                        columna=col_unid,
+                        inicio=inicio,
+                        final=final
+                    )
+
+
+                    # ---------------------------------------------
+                    # Restaurar los valores principales
+                    # ---------------------------------------------
+
+                    ws.cell(
+                        row=inicio,
+                        column=col_lote
+                    ).value = valor_lote
+
+
+                    ws.cell(
+                        row=inicio,
+                        column=col_unid
+                    ).value = total_unidades
+
+
+                    # ---------------------------------------------
+                    # Crear LOS DOS merges definitivos
+                    # con exactamente las mismas filas
+                    # ---------------------------------------------
+
+                    if final > inicio:
+
+                        ws.merge_cells(
+                            start_row=inicio,
+                            start_column=col_lote,
+                            end_row=final,
+                            end_column=col_lote
+                        )
+
+
+                        ws.merge_cells(
+                            start_row=inicio,
+                            start_column=col_unid,
+                            end_row=final,
+                            end_column=col_unid
+                        )
+
     def combinar_rangos_repetidos_final(ws,bloques_op):
         """
         Une rangos consecutivos que tengan el mismo valor,
@@ -2735,10 +3363,7 @@ def formatear_resumen_excel(ruta_excel, ruta_salida=None, hoja=None):
                         i += 1
 
 
-        print(
-            "Rangos repetidos consolidados:",
-            numero_combinaciones
-        )
+        # print("Rangos repetidos consolidados:",numero_combinaciones)
         
     def combinar_filas_adicionales_por_numero_serie(ws,bloques_op):
         """
@@ -3255,28 +3880,24 @@ def formatear_resumen_excel(ruta_excel, ruta_salida=None, hoja=None):
         # INFORMACIÓN DE CONTROL
         # ========================================================
 
-        print(
-            "Columnas PCB detectadas:",
-            [
-                ws.cell(
-                    row=1,
-                    column=c
-                ).value
-                for c in columnas_pcb
-            ]
-        )
+        # print(
+        #     "Columnas PCB detectadas:",
+        #     [
+        #         ws.cell(
+        #             row=1,
+        #             column=c
+        #         ).value
+        #         for c in columnas_pcb
+        #     ]
+        # )
 
-        print(
-            "Bloques de NUMERO_SERIE repetido:",
-            len(bloques_ns_repetidos)
-        )
+        # print("Bloques de NUMERO_SERIE repetido:",len(bloques_ns_repetidos))
 
     def es_vacio(valor):
         return (
             valor is None
             or str(valor).strip() == ""
         )
-
 
     def normalizar_valor(valor):
         """
@@ -3291,7 +3912,6 @@ def formatear_resumen_excel(ruta_excel, ruta_salida=None, hoja=None):
             return ""
 
         return str(valor).strip()
-
 
     def convertir_numero(valor, celda=None):
         """
@@ -3332,7 +3952,6 @@ def formatear_resumen_excel(ruta_excel, ruta_salida=None, hoja=None):
                 f"no puede interpretarse como unidades."
             )
 
-
     def limpiar_total(total):
         """
         Si el resultado es entero:
@@ -3343,7 +3962,6 @@ def formatear_resumen_excel(ruta_excel, ruta_salida=None, hoja=None):
             return int(total)
 
         return total
-
 
     def obtener_bloques_iguales(columna,fila_inicio,fila_final):
         """
@@ -3410,6 +4028,12 @@ def formatear_resumen_excel(ruta_excel, ruta_salida=None, hoja=None):
 
         return bloques
 
+
+    # ========================================================
+    # ELIMINAMOS LAS COLUMNAS VACIAS
+    # ========================================================
+    # MUY IMPORTANTE HACER AL PRINCIPIO YA QUE AFECTA A LA COMBINACION DE CELDAS
+    # eliminar_columnas_vacias(ws=ws)
 
     # ============================================================
     # IDENTIFICAR COLUMNAS
@@ -3913,12 +4537,17 @@ def formatear_resumen_excel(ruta_excel, ruta_salida=None, hoja=None):
 
     combinar_filas_adicionales_por_numero_serie(ws=ws,bloques_op=bloques_op)
 
-
     # ========================================================
     # CONSOLIDAR RANGOS REPETIDOS
     # ========================================================
 
     combinar_rangos_repetidos_final(ws=ws,bloques_op=bloques_op)
+
+    # ========================================================
+    # CONSOLIDAR LOTES Y UNIDADES FINAL
+    # ========================================================
+
+    consolidar_lotes_y_unidades_final(ws=ws, bloques_op=bloques_op, pares_lote_unid=pares_lote_unid)
 
     # ========================================================
     # FORMATO GENERAL DE LA HOJA
@@ -3951,7 +4580,6 @@ def formatear_resumen_excel(ruta_excel, ruta_salida=None, hoja=None):
                 vertical="center",
                 wrap_text=False
             )
-
 
     # --------------------------------------------------------
     # 2. EVITAR SALTOS DE TEXTO EN TODAS LAS CELDAS
@@ -4058,6 +4686,91 @@ def formatear_resumen_excel(ruta_excel, ruta_salida=None, hoja=None):
     )
 
     return ruta_salida
+
+def revisa_informacion_bachrecord(df):
+    """
+    Revisa la información necesaria para generar el Batch Record.
+
+    Devuelve una lista con las incidencias encontradas.
+
+    Para las celdas vacías devuelve:
+        - nombre de la columna
+        - lote del artículo principal
+    """
+
+    info_faltante = []
+
+    def revisar_celdas_vacias(df_articulo, articulo):
+        """
+        Revisa todas las celdas del DataFrame.
+
+        Una celda se considera vacía cuando:
+        - es None
+        - es NaN / pd.NA
+        - es ""
+        - contiene únicamente espacios
+
+        Devuelve una lista con:
+            columna
+            lote_principal
+        """
+
+        faltantes = []
+
+        # ----------------------------------------------------
+        # LOCALIZAR LOTE DEL ARTÍCULO PRINCIPAL
+        # ----------------------------------------------------
+
+        columna_lote_principal = "NUMERO_SERIE"
+
+        if columna_lote_principal not in df_articulo.columns:
+            raise ValueError(f"No se encuentra la columna del lote principal: "f"'{columna_lote_principal}'")
+
+        # ----------------------------------------------------
+        # FUNCIÓN PARA SABER SI UN VALOR ESTÁ VACÍO
+        # ----------------------------------------------------
+
+        def es_vacio(valor):
+
+            if pd.isna(valor):
+                return True
+
+            if isinstance(valor, str):
+                return valor.strip() == ""
+
+            return False
+
+        # ----------------------------------------------------
+        # RECORRER FILAS
+        # ----------------------------------------------------
+
+        for _, fila in df_articulo.iterrows():
+
+            lote_principal = fila[columna_lote_principal]
+
+            # -----------------------------------------------
+            # Recorrer todas las columnas
+            # -----------------------------------------------
+
+            for columna in df_articulo.columns:
+
+                valor = fila[columna]
+
+                if es_vacio(valor):
+
+                    faltantes.append(
+                        {
+                            "msg":f"En el excel resumen del {articulo} se ha encontrado celdas vacias en la columna {columna} del articulo {lote_principal}",
+                            "columna": columna,
+                            "lote_principal": lote_principal
+                        }
+                    )
+
+        return faltantes
+
+    info_faltante.extend(revisar_celdas_vacias(df, "Articulo Principal"))
+
+    return info_faltante
 
 DF_PNT = leer_excel_PNTs()
 dic_config = leer_configuracion()
@@ -4195,9 +4908,9 @@ if __name__ == "__main__":
         index=False
     )
             
-    print('\nSe han procesado los articulos:',articulos_procesados,'\n')
+    print('\nSe han procesado los articulos:',articulos_procesados)
     print('\nQuedan pendientes de procesar:',articulos_pendientes,'\n')
-    time.sleep(1)
+    time.sleep(2)
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ PROCESAMOS EL BACHRECORD ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━═════════════════════════════════════════════════════════════════════════════┛
 
     # PRIMER PEDIMOS LOS NUMEROS DE SERIE DEL BACHRECORD QUE SE QUIERE GENERAR
@@ -4219,8 +4932,8 @@ if __name__ == "__main__":
         df_resumen, _, _ = leer_excel_resumen(ruta_carpeta_articulo)
         ns_producidos = (df_resumen["NUMERO_SERIE"].dropna().astype(str).unique().tolist())
         
-        ns_inicio_br = "EPB1230001" # TODO BORRAR  AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-        ns_final_br = "EPB1260953" # TODO BORRAR  AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+        ns_inicio_br = "EPB1260900" # TODO BORRAR  AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+        ns_final_br = "EPB1260950" # TODO BORRAR  AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 
         # ns_inicio_br = input("Introduzca el número de serie inicial: ").strip()
         # while ns_inicio_br not in ns_producidos:
@@ -4236,9 +4949,17 @@ if __name__ == "__main__":
         #     ns_final_br = input("Introduzca el número de serie final: ").strip()
 
         # A PARTIR DE ESTE PUNTO YA TENEMOS EL DISPOSITIVO Y LOS NUMEROS DE SERIE QUE SE QUIEREN PROCESAR PARA EL BACHRECORD
-        df_dispoitivoBR = filtrar_filas_entre_valores(df_resumen, "NUMERO_SERIE", ns_inicio_br, ns_final_br)
+        df_dispoitivoBR = filtrar_filas_entre_valores(df_resumen, "NUMERO_SERIE", ns_inicio_br, ns_final_br) # Nos quedamos unicamente con los ns que queremos para el bachredord
+        df_dispoitivoBR = eliminar_articulos_vacios_df(df_dispoitivoBR) # Eliminamos los articulos vacios que se generan por culpa de haber cambiado las estructuras de las producciones
         df_dispoitivoBR.to_excel('./temp/dispositivoBR_temp.xlsx', index=False)# guardamos en excel si queremos consultar algo
 
+        info_faltante = revisa_informacion_bachrecord(df_dispoitivoBR)
+
+
+        for error in info_faltante:
+            print(error["msg"])
+        time.sleep(5)
+        # Antes de formatear el excel nos aseguraamos de que todo el contenido que necesitmaos esta
         formatear_resumen_excel('./temp/dispositivoBR_temp.xlsx', ruta_salida='./temp/tempfiltrado.xlsx', hoja=None)
         print("Archivo temporal filtrado y formateado guardado en './temp/tempfiltrado.xlsx'.")
         # FILTRAMOS EL EXCEL RESUMEN DEL DISPOSITIVO A LOS NUMEROS DE SERIE QUE NOS INTERESA
