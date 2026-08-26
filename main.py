@@ -23,8 +23,10 @@ from openpyxl import load_workbook
 from openpyxl.styles import Alignment,Font, Alignment
 from openpyxl.utils import get_column_letter
 from openpyxl.cell.cell import MergedCell
+from openpyxl.styles import Border, Side
+import pickle
 
-
+from pprint import pprint
 from pdf_gen import *
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ "COMPILACION" ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
@@ -37,14 +39,16 @@ GENERAR_PDF_ORDENES = True # True genera las ordenes, false no las genera
 CONSOLAS = ['EPTEV01V01_CON','EPTEV01V02_CON','EPTEV02V01_CON','EPTEV02V02_CON'] # ARTICULOS QUE NO SE BUSCA EL PNT EN EL RESUMEN DEL ARTICULO
 DISPOSITIVOS = ['EPTEV02DEV01', 'EPTEV02DEV02', 'EPTEV01DEV01', 'EPTEV01DEV02']
 INDICE_ARTICULOS = ['MATERIA PRIMA RAW', 'MATERIA PRIMA N1', 'MATERIA PRIMA N2', 'DISPOSITIVOS'] # SIEMPRE ORDENADOS DE MAS PROCESADOS A MENOS PROCESADOS
+DISPOSITIVO_CONSOLA = {'EPTEV01DEV01':'EPTEV01V01_CON','EPTEV01DEV02': 'EPTEV01V02_CON','EPTEV02DEV01': 'EPTEV02V01_CON','EPTEV02DEV02': 'EPTEV02V02_CON'}
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ COMPROBAMOS LOS DIRECTORIOS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 
 RUTA_RAIZ = './data/'
+RUTA_ERP =  RUTA_RAIZ + 'PNT MDR/ERP/'
 RUTA_IMD = RUTA_RAIZ + 'PNT MDR/ERP/I+D/'
-RUTA_PNT ='./data/REG.7.5-02-02_CONTROL PNT.xlsx'
+RUTA_PNT =  RUTA_RAIZ +'PNT MDR/PNT.7.5-02_CONTROL DE CALIDAD/Registros MDR'
+RUTA_PNT_EXCEL = RUTA_RAIZ +'PNT MDR/PNT.7.5-02_CONTROL DE CALIDAD/Registros MDR/REG.7.5-02-02_CONTROL PNT.xlsx'
 RUTA_CONFIG ='./config/config.xlsx'
-RUTA_CHECKLIST = 'PNT MDR/ERP/I+D/'
 RUTA_ETIQUETAS = './data/IMPRESION_ETIQUETAS/' # PARA LOS REQUISITOS ESPECIALES DEL BACH RECORD DISPOSITIVOS FUERA DE ESPAÑA
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ GLOBALES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -65,6 +69,67 @@ patron_orden_produccion = re.compile(
 )
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ FUNCIONES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
+def convertir_excels_lotes_erp_a_pdf(carpeta_erp=RUTA_ERP):
+
+    '''
+    COMBIERTE A PDF LOS LOTES DE LOS ARTICULOS COMPRADOS
+    '''
+    carpeta_erp = Path(carpeta_erp)
+    extensiones_excel = {".xlsx", ".xls", ".xlsm", ".xlsb"}
+
+    pdf_generados = []
+    errores = []
+
+    if not carpeta_erp.exists():
+        raise FileNotFoundError(f"No existe la carpeta ERP: {carpeta_erp}")
+
+    for raiz, carpetas, archivos in os.walk(carpeta_erp):
+
+        # No entrar en I+D
+        carpetas[:] = [carpeta for carpeta in carpetas if carpeta.strip().upper() != "I+D"]
+
+        for nombre_archivo in archivos:
+
+            ruta_excel = Path(raiz) / nombre_archivo
+
+            if ruta_excel.suffix.lower() not in extensiones_excel:
+                continue
+
+            if ruta_excel.name.startswith("~$"):
+                continue
+
+            if "LOTES" not in ruta_excel.stem.upper():
+                continue
+
+            try:
+                print(f"Convirtiendo: {ruta_excel}")
+
+                ruta_pdf = excel_resumen_a_pdf_una_hoja(ruta_excel)
+
+                pdf_generados.append(str(ruta_pdf))
+
+            except Exception as e:
+                errores.append({"excel": str(ruta_excel), "error": str(e)})
+                print(f"ERROR convirtiendo {ruta_excel}: {e}")
+
+    print(f"\nPDF generados: {len(pdf_generados)}")
+    print(f"Errores: {len(errores)}")
+
+    return pdf_generados, errores
+
+def guardar_diccionario(diccionario, ruta="./temp/estructura_documental.pkl"):
+    ruta = Path(ruta)
+    ruta.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(ruta, "wb") as archivo:
+        pickle.dump(diccionario, archivo)
+
+    return str(ruta)
+
+def cargar_diccionario(ruta="./temp/estructura_documental.pkl"):
+    with open(ruta, "rb") as archivo:
+        return pickle.load(archivo)
 
 def eliminar_articulos_vacios_df(df):
     """
@@ -190,10 +255,7 @@ def eliminar_articulos_vacios_df(df):
         if bloque_vacio:
 
             columnas_eliminar.extend(columnas_articulo)
-
-            print(
-                f"Artículo vacío eliminado: {articulo}"
-            )
+            # print(f"Artículo vacío eliminado: {articulo}")
 
 
     # ========================================================
@@ -264,7 +326,120 @@ def obtener_unico_excel(directorio):
 
     return excels[0]
 
-def convertir_excel_a_pdf(ruta_excel: str | Path) -> Path:
+def excel_resumen_a_pdf_una_hoja(ruta_excel, ruta_pdf=None, hoja=None, horizontal=True):
+    """
+    Convierte una hoja Excel en un PDF de una única página.
+
+    Detecta automáticamente:
+        - última fila con información
+        - última columna con información
+
+    Solo imprime el rango realmente utilizado y fuerza todo el contenido
+    a una única página PDF.
+
+    Parámetros:
+        ruta_excel : ruta del Excel.
+        ruta_pdf   : ruta del PDF de salida. Si es None usa el mismo nombre.
+        hoja       : nombre de la hoja. Si es None usa la primera.
+        horizontal : True -> horizontal, False -> vertical.
+
+    Devuelve:
+        Ruta del PDF generado.
+    """
+
+    ruta_excel = Path(ruta_excel).resolve()
+
+    if not ruta_excel.exists():
+        raise FileNotFoundError(f"No existe el Excel: {ruta_excel}")
+
+    if ruta_pdf is None:
+        ruta_pdf = ruta_excel.with_suffix(".pdf")
+    else:
+        ruta_pdf = Path(ruta_pdf).resolve()
+
+    ruta_pdf.parent.mkdir(parents=True, exist_ok=True)
+
+    excel = None
+    libro = None
+
+    try:
+        excel = win32.DispatchEx("Excel.Application")
+        excel.Visible = False
+        excel.DisplayAlerts = False
+
+        libro = excel.Workbooks.Open(str(ruta_excel))
+
+        if hoja is None:
+            ws = libro.Worksheets(1)
+        else:
+            ws = libro.Worksheets(hoja)
+
+        # ========================================================
+        # LOCALIZAR ÚLTIMA FILA CON INFORMACIÓN REAL
+        # ========================================================
+
+        ultima_celda_fila = ws.Cells.Find(What="*", After=ws.Cells(1, 1), LookAt=1, LookIn=-4123, SearchOrder=1, SearchDirection=2, MatchCase=False)
+
+        # ========================================================
+        # LOCALIZAR ÚLTIMA COLUMNA CON INFORMACIÓN REAL
+        # ========================================================
+
+        ultima_celda_columna = ws.Cells.Find(What="*", After=ws.Cells(1, 1), LookAt=1, LookIn=-4123, SearchOrder=2, SearchDirection=2, MatchCase=False)
+
+        if ultima_celda_fila is None or ultima_celda_columna is None:
+            raise ValueError(f"La hoja '{ws.Name}' no contiene información.")
+
+        ultima_fila = ultima_celda_fila.Row
+        ultima_columna = ultima_celda_columna.Column
+
+        # ========================================================
+        # ÁREA DE IMPRESIÓN
+        # ========================================================
+
+        rango = ws.Range(ws.Cells(1, 1), ws.Cells(ultima_fila, ultima_columna))
+        ws.PageSetup.PrintArea = rango.Address
+
+        # ========================================================
+        # CONFIGURACIÓN DE PÁGINA
+        # ========================================================
+
+        ws.PageSetup.Zoom = False
+        ws.PageSetup.FitToPagesWide = 1
+        ws.PageSetup.FitToPagesTall = 1
+        ws.PageSetup.Orientation = 2 if horizontal else 1
+
+        # Márgenes pequeños para aprovechar la página
+        ws.PageSetup.LeftMargin = excel.CentimetersToPoints(0.5)
+        ws.PageSetup.RightMargin = excel.CentimetersToPoints(0.5)
+        ws.PageSetup.TopMargin = excel.CentimetersToPoints(0.5)
+        ws.PageSetup.BottomMargin = excel.CentimetersToPoints(0.5)
+        ws.PageSetup.HeaderMargin = 0
+        ws.PageSetup.FooterMargin = 0
+
+        # Centrar en la página
+        ws.PageSetup.CenterHorizontally = True
+        ws.PageSetup.CenterVertically = True
+
+        # ========================================================
+        # EXPORTAR PDF
+        # ========================================================
+
+        ws.ExportAsFixedFormat(0, str(ruta_pdf), Quality=0, IncludeDocProperties=True, IgnorePrintAreas=False, OpenAfterPublish=False)
+
+        print(f"Excel convertido a PDF: {ruta_pdf}")
+        # ultima_celda = ws.Cells(ultima_fila, ultima_columna).Address.replace("$", "")
+        # print(f"Rango impreso: A1:{ultima_celda}")
+
+        return str(ruta_pdf)
+
+    finally:
+        if libro is not None:
+            libro.Close(SaveChanges=False)
+
+        if excel is not None:
+            excel.Quit()
+
+def convertir_orden_excel_a_pdf(ruta_excel: str | Path) -> Path:
     """
     Convierte un Excel a PDF en la misma carpeta.
 
@@ -716,7 +891,7 @@ def leer_excel_PNTs():
     Carga el Excel de PNT y devuelve un DataFrame con los datos.
     """
 
-    df_pnt = pd.read_excel(RUTA_PNT).ffill(axis=0)
+    df_pnt = pd.read_excel(RUTA_PNT_EXCEL).ffill(axis=0)
 
     # Normalizamos los nombres de las columnas
     df_pnt.columns = [
@@ -1719,7 +1894,6 @@ def crear_df_consumos_por_nserie(orden_produccion, nombre_articulo, df_produccio
         # Creamos una o varias filas repitiendo el número de serie
         for posicion_consumo in range(numero_filas_serie):
 
-
             if(nombre_articulo not in CONSOLAS):
                 fila = {
                     "ORDEN DE PRODUCCION": orden_produccion,
@@ -1736,7 +1910,7 @@ def crear_df_consumos_por_nserie(orden_produccion, nombre_articulo, df_produccio
 
             
             for componente in componentes:
-
+                
                 consumos = distribuciones[
                     componente
                 ].get(numero_serie, [])
@@ -1902,17 +2076,19 @@ def procesar_orden(ruta_excel):
     )
 
     # Buscamos el PNT del artículo principal y lo añadimos al DataFrame
+
     if(nombre_articulo not in CONSOLAS):
-        pnt_articulo = buscar_pnt_orden(df_pnt=DF_PNT, nombre_orden=nombre_orden,nombre_articulo=nombre_articulo)
+        pnt_articulo = buscar_pnt_orden(df_pnt=DF_PNT, nombre_orden=nombre_orden, nombre_articulo=nombre_articulo)
         df_consumos[f"{nombre_articulo}_PNT"] = pnt_articulo
 
     # Buscamos el PNT y el albarán de cada componente y los añadimos al DataFrame de consumos
     # print(componentes_articulo)
+
     for componente in componentes_articulo:
         if componente not in CONSOLAS:
             columna_lote = f"{componente}_LOTE"
 
-            if(nombre_articulo not in CONSOLAS):
+            if(componente not in CONSOLAS):
                 columna_pnt = f"{componente}_PNT"
 
             columna_albaran = f"{componente}_ALBARAN"
@@ -1922,8 +2098,9 @@ def procesar_orden(ruta_excel):
             lotes_unicos = lotes_unicos[lotes_unicos != ""].unique()
 
             # Buscamos el PNT y el albarán una sola vez por cada lote
+
             mapa_lote_datos = {
-                lote: buscar_pnt_articulo(df_pnt=DF_PNT,componente=componente,lote_numero_buscado=lote) 
+                lote: buscar_pnt_articulo(df_pnt=DF_PNT, componente=componente, lote_numero_buscado=lote) 
                 for lote in lotes_unicos
             }
 
@@ -1936,7 +2113,7 @@ def procesar_orden(ruta_excel):
             serie_lotes = df_consumos[columna_lote].fillna("").astype(str).str.strip()
 
             # Asignamos el PNT
-            if(nombre_articulo not in CONSOLAS):
+            if(componente not in CONSOLAS):
                 df_consumos[columna_pnt] = (serie_lotes.map(mapa_lote_pnt).fillna(""))
 
             # Asignamos el albarán
@@ -2278,7 +2455,7 @@ def obtener_requisitos_especiales(dispositivo, ns_ini, ns_final):
     # Como trabajamos unicamente con los ultimos 4 digitos necesitamos recuperar el numero de serie completo
     ruta_carpeta_articulo =  Path(RUTA_IMD + dispositivo +'/')
     df_resumen, _, _ = leer_excel_resumen(ruta_carpeta_articulo)
-    print(df_resumen)
+    # print(df_resumen)
     numeros_serie_completos = (df_resumen["NUMERO_SERIE"].dropna().astype(str).unique().tolist())
 
     def buscar_numero_serie_completo(ns_incompleto, lista_completos):
@@ -2353,7 +2530,7 @@ def filtrar_filas_entre_valores(df,columna_filtro,valor_inicio,valor_final):
     # Filtrar incluyendo ambas filas
     return df.loc[indice_inicio:indice_final].copy()
 
-def formatear_resumen_excel(ruta_excel, ruta_salida=None, hoja=None):
+def formatear_resumen_excel(ruta_excel, ruta_salida=None, hoja=None, device=None):
     """
     Formatea el Excel resumen agrupando visualmente la información.
 
@@ -2388,8 +2565,8 @@ def formatear_resumen_excel(ruta_excel, ruta_salida=None, hoja=None):
     Path
         Ruta del Excel generado.
     """
-
     ruta_excel = Path(ruta_excel)
+    # print(f"Formatenado excel {ruta_excel.name}")
 
     # ========================================================
     # RUTA DE SALIDA
@@ -2450,12 +2627,13 @@ def formatear_resumen_excel(ruta_excel, ruta_salida=None, hoja=None):
             "No se encuentra la columna 'UNIDADES'."
         )
 
-    if "EPTEV02DEV01_PNT" not in columnas:
+    if f"{device}_PNT" not in columnas:
 
-        raise ValueError(
-            "No se encuentra la columna "
-            "'EPTEV02DEV01_PNT'."
-        )
+        if device  not in CONSOLAS:
+            raise ValueError(
+                "No se encuentra la columna "
+                f"{device}_PNT"
+            )
 
     col_unidades = columnas["UNIDADES"]
     # ------------------------------------------------------------
@@ -2477,7 +2655,11 @@ def formatear_resumen_excel(ruta_excel, ruta_salida=None, hoja=None):
             "'NUMERO_SERIE' ni 'NUMERO DE SERIE'."
         )
 
-    col_pnt = columnas["EPTEV02DEV01_PNT"]
+    if device not in CONSOLAS:
+        col_pnt = columnas[f"{device}_PNT"]
+    else:
+        col_pnt = []
+
 
     primera_fila = 2
     ultima_fila = ws.max_row
@@ -3057,11 +3239,7 @@ def formatear_resumen_excel(ruta_excel, ruta_salida=None, hoja=None):
         # PROCESAR OP POR OP
         # ========================================================
 
-        for (
-            inicio_op,
-            final_op,
-            valor_op
-        ) in bloques_op:
+        for (inicio_op,final_op,valor_op) in bloques_op:
 
 
             # ====================================================
@@ -3069,7 +3247,6 @@ def formatear_resumen_excel(ruta_excel, ruta_salida=None, hoja=None):
             # ====================================================
 
             for columna in columnas_objetivo:
-
 
                 # ------------------------------------------------
                 # Obtener los rangos combinados existentes
@@ -3143,7 +3320,6 @@ def formatear_resumen_excel(ruta_excel, ruta_salida=None, hoja=None):
                     rango = rango_por_fila.get(
                         fila
                     )
-
 
                     # ---------------------------------------------
                     # CELDA YA COMBINADA
@@ -4028,6 +4204,270 @@ def formatear_resumen_excel(ruta_excel, ruta_salida=None, hoja=None):
 
         return bloques
 
+    def consolidar_albaranes_pnt_con_vacios(ws,bloques_op):
+        """
+        Consolida las columnas *_ALBARAN y *_PNT dentro de cada OP.
+
+        Los vacíos se consideran continuación del último valor
+        no vacío.
+
+        El bloque solamente termina cuando aparece un valor
+        no vacío diferente.
+
+        Nunca combina entre dos OP distintas.
+        """
+
+        def es_vacio(valor):
+            return (
+                valor is None
+                or str(valor).strip() == ""
+            )
+
+        def normalizar(valor):
+
+            if valor is None:
+                return ""
+
+            return str(valor).strip()
+
+        # ========================================================
+        # COLUMNAS ALBARAN / PNT
+        # ========================================================
+
+        columnas_objetivo = []
+
+        for columna in range(
+            1,
+            ws.max_column + 1
+        ):
+
+            cabecera = ws.cell(
+                row=1,
+                column=columna
+            ).value
+
+            if cabecera is None:
+                continue
+
+            nombre = (
+                str(cabecera)
+                .strip()
+                .upper()
+                .replace(" ", "")
+            )
+
+            if (
+                nombre.endswith("_ALBARAN")
+                or
+                nombre.endswith("_PNT")
+            ):
+
+                columnas_objetivo.append(
+                    columna
+                )
+
+        # ========================================================
+        # PROCESAR OP POR OP
+        # ========================================================
+
+        for inicio_op, final_op, valor_op in bloques_op:
+
+            for columna in columnas_objetivo:
+
+                # ------------------------------------------------
+                # Primero descombinar ESTA columna dentro de la OP
+                # conservando los valores
+                # ------------------------------------------------
+
+                rangos = []
+
+                for rango in list(
+                    ws.merged_cells.ranges
+                ):
+
+                    if (
+                        rango.min_col == columna
+                        and
+                        rango.max_col == columna
+                        and
+                        rango.min_row >= inicio_op
+                        and
+                        rango.max_row <= final_op
+                    ):
+
+                        valor = ws.cell(
+                            row=rango.min_row,
+                            column=columna
+                        ).value
+
+                        rangos.append(
+                            (
+                                str(rango),
+                                rango.min_row,
+                                valor
+                            )
+                        )
+
+                # -----------------------------------------------
+                # Descombinar y restaurar valor superior
+                # -----------------------------------------------
+
+                for (
+                    nombre_rango,
+                    fila_inicio,
+                    valor
+                ) in rangos:
+
+                    ws.unmerge_cells(
+                        nombre_rango
+                    )
+
+                # =================================================
+                # RECORRER LA COLUMNA
+                # =================================================
+
+                fila = inicio_op
+
+                while fila <= final_op:
+
+                    valor = ws.cell(
+                        row=fila,
+                        column=columna
+                    ).value
+
+                    # No podemos empezar un bloque con vacío
+                    if es_vacio(valor):
+
+                        fila += 1
+                        continue
+
+                    valor_actual = normalizar(
+                        valor
+                    )
+
+                    inicio_bloque = fila
+                    final_bloque = fila
+
+                    siguiente = fila + 1
+
+                    # =============================================
+                    # AMPLIAR HASTA ENCONTRAR VALOR DIFERENTE
+                    # =============================================
+
+                    while siguiente <= final_op:
+
+                        valor_siguiente = ws.cell(
+                            row=siguiente,
+                            column=columna
+                        ).value
+
+                        # VACÍO:
+                        # continúa aplicando el valor anterior
+                        if es_vacio(
+                            valor_siguiente
+                        ):
+
+                            final_bloque = siguiente
+                            siguiente += 1
+                            continue
+
+                        # MISMO VALOR:
+                        # continúa el mismo bloque
+                        if (
+                            normalizar(valor_siguiente)
+                            == valor_actual
+                        ):
+
+                            final_bloque = siguiente
+                            siguiente += 1
+                            continue
+
+                        # Valor real diferente
+                        break
+
+                    # =============================================
+                    # CREAR MERGE DEFINITIVO
+                    # =============================================
+
+                    if final_bloque > inicio_bloque:
+
+                        ws.merge_cells(
+                            start_row=inicio_bloque,
+                            start_column=columna,
+                            end_row=final_bloque,
+                            end_column=columna
+                        )
+
+                    fila = siguiente
+
+
+    def aplicar_bordes_contenido(ws):
+
+        borde_fino = Side(style="thin", color="000000")
+
+        def es_vacio(valor):
+            if valor is None:
+                return True
+            if isinstance(valor, str):
+                return valor.strip() == ""
+            return False
+
+        def aplicar_lados(celda, izquierda=None, derecha=None, arriba=None, abajo=None):
+            celda.border = Border(left=izquierda if izquierda is not None else celda.border.left, right=derecha if derecha is not None else celda.border.right, top=arriba if arriba is not None else celda.border.top, bottom=abajo if abajo is not None else celda.border.bottom)
+
+        # ========================================================
+        # GUARDAR TODAS LAS CELDAS QUE PERTENECEN A MERGES
+        # ========================================================
+
+        celdas_combinadas = set()
+
+        for rango in ws.merged_cells.ranges:
+            for fila in range(rango.min_row, rango.max_row + 1):
+                for columna in range(rango.min_col, rango.max_col + 1):
+                    celdas_combinadas.add((fila, columna))
+
+        # ========================================================
+        # CELDAS NORMALES NO VACÍAS
+        # ========================================================
+
+        for fila in ws.iter_rows():
+            for celda in fila:
+
+                if (celda.row, celda.column) in celdas_combinadas:
+                    continue
+
+                if es_vacio(celda.value):
+                    continue
+
+                celda.border = Border(left=borde_fino, right=borde_fino, top=borde_fino, bottom=borde_fino)
+
+        # ========================================================
+        # RANGOS COMBINADOS
+        # Solo dibujamos el CONTORNO EXTERIOR
+        # ========================================================
+
+        for rango in ws.merged_cells.ranges:
+
+            celda_principal = ws.cell(rango.min_row, rango.min_col)
+
+            if es_vacio(celda_principal.value):
+                continue
+
+            # Borde superior
+            for columna in range(rango.min_col, rango.max_col + 1):
+                aplicar_lados(ws.cell(rango.min_row, columna), arriba=borde_fino)
+
+            # Borde inferior
+            for columna in range(rango.min_col, rango.max_col + 1):
+                aplicar_lados(ws.cell(rango.max_row, columna), abajo=borde_fino)
+
+            # Borde izquierdo
+            for fila in range(rango.min_row, rango.max_row + 1):
+                aplicar_lados(ws.cell(fila, rango.min_col), izquierda=borde_fino)
+
+            # Borde derecho
+            for fila in range(rango.min_row, rango.max_row + 1):
+                aplicar_lados(ws.cell(fila, rango.max_col), derecha=borde_fino)
 
     # ========================================================
     # ELIMINAMOS LAS COLUMNAS VACIAS
@@ -4089,7 +4529,6 @@ def formatear_resumen_excel(ruta_excel, ruta_salida=None, hoja=None):
 
     col_unidades = columnas["UNIDADES"]
 
-
     # ============================================================
     # IDENTIFICAR AUTOMÁTICAMENTE TODAS LAS COLUMNAS
     # *_LOTE, *_UNID Y *_PNT
@@ -4100,16 +4539,9 @@ def formatear_resumen_excel(ruta_excel, ruta_salida=None, hoja=None):
     columnas_albaran = []
     columnas_pnt = []
 
+    for numero_columna in range(1, ws.max_column + 1):
 
-    for numero_columna in range(
-        1,
-        ws.max_column + 1
-    ):
-
-        cabecera = ws.cell(
-            row=1,
-            column=numero_columna
-        ).value
+        cabecera = ws.cell(row=1,column=numero_columna).value
 
         if cabecera is None:
             continue
@@ -4197,7 +4629,6 @@ def formatear_resumen_excel(ruta_excel, ruta_salida=None, hoja=None):
     bloques_op = []
 
     fila = primera_fila
-
 
     while fila <= ultima_fila:
 
@@ -4549,6 +4980,14 @@ def formatear_resumen_excel(ruta_excel, ruta_salida=None, hoja=None):
 
     consolidar_lotes_y_unidades_final(ws=ws, bloques_op=bloques_op, pares_lote_unid=pares_lote_unid)
 
+
+
+    # ========================================================
+    # CONSOLIDAR ALBARANES Y PNT VACIOS
+    # ========================================================  
+    
+    consolidar_albaranes_pnt_con_vacios(ws=ws,bloques_op=bloques_op)
+
     # ========================================================
     # FORMATO GENERAL DE LA HOJA
     # ========================================================
@@ -4677,6 +5116,12 @@ def formatear_resumen_excel(ruta_excel, ruta_salida=None, hoja=None):
         for cell in row:
             if not isinstance(cell, MergedCell):
                 cell.alignment = alineacion_centrada
+
+
+    # --------------------------------------------------------
+    # 4. APLICAMOS EL FORMATO FINAL PARA QUE APAREZCAN LOS BORDES
+    # --------------------------------------------------------
+    aplicar_bordes_contenido(ws)
     # ========================================================
     # GUARDAR
     # ========================================================
@@ -4687,136 +5132,994 @@ def formatear_resumen_excel(ruta_excel, ruta_salida=None, hoja=None):
 
     return ruta_salida
 
-def revisa_informacion_bachrecord(df):
+def revisa_informacion_bachrecord(df, dispositivo):
     """
     Revisa la información necesaria para generar el Batch Record.
 
-    Devuelve una lista con las incidencias encontradas.
+    Tiene en cuenta que un mismo NUMERO_SERIE puede ocupar
+    varias filas porque algún componente utiliza más de un lote.
 
-    Para las celdas vacías devuelve:
-        - nombre de la columna
-        - lote del artículo principal
+    Para un mismo NUMERO_SERIE:
+        - una celda vacía NO se considera error si en otra fila
+          del mismo NS esa columna tiene información.
+        - solo se considera información faltante si TODAS las
+          filas de ese NS están vacías para esa columna.
+
+    Devuelve una lista de incidencias.
     """
 
     info_faltante = []
 
+    # ========================================================
+    # FUNCIÓN INTERNA
+    # ========================================================
+
+    # def revisar_celdas_vacias(df_articulo,articulo):
+
+    #     faltantes = []
+
+    #     columna_ns = "NUMERO_SERIE"
+
+    #     if columna_ns not in df_articulo.columns:
+
+    #         raise ValueError(
+    #             f"No se encuentra la columna "
+    #             f"'{columna_ns}'"
+    #         )
+
+    #     # ====================================================
+    #     # SABER SI UN VALOR ESTÁ VACÍO
+    #     # ====================================================
+
+    #     def es_vacio(valor):
+
+    #         if pd.isna(valor):
+    #             return True
+
+    #         if isinstance(valor, str):
+    #             return valor.strip() == ""
+
+    #         return False
+
+
+    #     # ====================================================
+    #     # AGRUPAR FILAS CONSECUTIVAS DEL MISMO NS
+    #     # ====================================================
+
+    #     bloques_ns = []
+
+    #     fila = 0
+
+    #     while fila < len(df_articulo):
+
+    #         numero_serie = df_articulo.iloc[
+    #             fila
+    #         ][columna_ns]
+
+    #         # ------------------------------------------------
+    #         # Si falta directamente el número de serie,
+    #         # esto sí es un error real
+    #         # ------------------------------------------------
+
+    #         if es_vacio(numero_serie):
+
+    #             faltantes.append(
+    #                 {
+    #                     "msg": (
+    #                         f"En el excel resumen del {articulo} "
+    #                         f"se ha encontrado una fila sin "
+    #                         f"NUMERO_SERIE"
+    #                     ),
+    #                     "columna": columna_ns,
+    #                     "lote_principal": None
+    #                 }
+    #             )
+
+    #             fila += 1
+    #             continue
+
+
+    #         numero_serie = str(
+    #             numero_serie
+    #         ).strip()
+
+    #         inicio = fila
+    #         final = fila
+
+    #         siguiente = fila + 1
+
+
+    #         # ------------------------------------------------
+    #         # Buscar filas consecutivas del mismo NS
+    #         # ------------------------------------------------
+
+    #         while siguiente < len(df_articulo):
+
+    #             siguiente_ns = df_articulo.iloc[
+    #                 siguiente
+    #             ][columna_ns]
+
+    #             if es_vacio(siguiente_ns):
+    #                 break
+
+    #             if (
+    #                 str(siguiente_ns).strip()
+    #                 != numero_serie
+    #             ):
+    #                 break
+
+    #             final = siguiente
+    #             siguiente += 1
+
+
+    #         bloques_ns.append(
+    #             (
+    #                 inicio,
+    #                 final,
+    #                 numero_serie
+    #             )
+    #         )
+
+    #         fila = final + 1
+
+
+    #     # ====================================================
+    #     # REVISAR CADA BLOQUE DE NS
+    #     # ====================================================
+
+    #     for (
+    #         inicio,
+    #         final,
+    #         numero_serie
+    #     ) in bloques_ns:
+
+    #         # Filas correspondientes al mismo dispositivo
+    #         bloque = df_articulo.iloc[
+    #             inicio:final + 1
+    #         ]
+
+
+    #         # =================================================
+    #         # REVISAR CADA COLUMNA
+    #         # =================================================
+
+    #         for columna in df_articulo.columns:
+
+    #             # NUMERO_SERIE ya está comprobado
+    #             if columna == columna_ns:
+    #                 continue
+
+
+    #             # ---------------------------------------------
+    #             # Obtener todos los valores de esta columna
+    #             # para este mismo número de serie
+    #             # ---------------------------------------------
+
+    #             valores = bloque[
+    #                 columna
+    #             ].tolist()
+
+
+    #             # ---------------------------------------------
+    #             # SOLO hay error si TODOS están vacíos
+    #             # ---------------------------------------------
+
+    #             todos_vacios = all(
+    #                 es_vacio(valor)
+    #                 for valor in valores
+    #             )
+
+
+    #             if todos_vacios:
+
+    #                 faltantes.append(
+    #                     {
+    #                         "msg": (
+    #                             f"En el excel resumen del "
+    #                             f"{articulo} falta información "
+    #                             f"en la columna {columna} "
+    #                             f"del artículo {numero_serie}"
+    #                         ),
+    #                         "columna": columna,
+    #                         "lote_principal": numero_serie
+    #                     }
+    #                 )
+
+
+    #     return faltantes
+
     def revisar_celdas_vacias(df_articulo, articulo):
-        """
-        Revisa todas las celdas del DataFrame.
-
-        Una celda se considera vacía cuando:
-        - es None
-        - es NaN / pd.NA
-        - es ""
-        - contiene únicamente espacios
-
-        Devuelve una lista con:
-            columna
-            lote_principal
-        """
 
         faltantes = []
+        columna_ns = "NUMERO_SERIE"
 
-        # ----------------------------------------------------
-        # LOCALIZAR LOTE DEL ARTÍCULO PRINCIPAL
-        # ----------------------------------------------------
+        if columna_ns not in df_articulo.columns:
+            raise ValueError(f"No se encuentra la columna '{columna_ns}'")
 
-        columna_lote_principal = "NUMERO_SERIE"
-
-        if columna_lote_principal not in df_articulo.columns:
-            raise ValueError(f"No se encuentra la columna del lote principal: "f"'{columna_lote_principal}'")
-
-        # ----------------------------------------------------
-        # FUNCIÓN PARA SABER SI UN VALOR ESTÁ VACÍO
-        # ----------------------------------------------------
+        # ========================================================
+        # SABER SI UN VALOR ESTÁ VACÍO
+        # ========================================================
 
         def es_vacio(valor):
-
             if pd.isna(valor):
                 return True
-
             if isinstance(valor, str):
                 return valor.strip() == ""
-
             return False
 
-        # ----------------------------------------------------
-        # RECORRER FILAS
-        # ----------------------------------------------------
+        # ========================================================
+        # LOCALIZAR GRUPOS DE 4 COLUMNAS DE CADA ARTÍCULO
+        # ========================================================
 
-        for _, fila in df_articulo.iterrows():
+        sufijos_articulo = ("_LOTE", "_UNID", "_ALBARAN", "_PNT")
+        grupos_articulos = {}
 
-            lote_principal = fila[columna_lote_principal]
+        for columna in df_articulo.columns:
+            nombre = str(columna).strip()
 
-            # -----------------------------------------------
-            # Recorrer todas las columnas
-            # -----------------------------------------------
+            for sufijo in sufijos_articulo:
+                if nombre.upper().endswith(sufijo):
+                    nombre_articulo = nombre[:-len(sufijo)]
+                    grupos_articulos.setdefault(nombre_articulo, {})[sufijo] = columna
+                    break
+
+        # ========================================================
+        # COMPROBAR SI UN ARTÍCULO ESTÁ COMPLETAMENTE VACÍO
+        # PARA UN DETERMINADO BLOQUE DE NUMERO_SERIE
+        # ========================================================
+
+        def articulo_completamente_vacio(bloque, nombre_articulo):
+
+            columnas = grupos_articulos.get(nombre_articulo, {})
+
+            # Solo aplicamos esta excepción si existen las 4 columnas
+            if not all(sufijo in columnas for sufijo in sufijos_articulo):
+                return False
+
+            for sufijo in sufijos_articulo:
+                columna = columnas[sufijo]
+
+                for valor in bloque[columna]:
+                    if not es_vacio(valor):
+                        return False
+
+            return True
+
+        # ========================================================
+        # AGRUPAR FILAS CONSECUTIVAS DEL MISMO NS
+        # ========================================================
+
+        bloques_ns = []
+        fila = 0
+
+        while fila < len(df_articulo):
+
+            numero_serie = df_articulo.iloc[fila][columna_ns]
+
+            if es_vacio(numero_serie):
+
+                faltantes.append({
+                    "msg": f"En el excel resumen del {articulo} se ha encontrado una fila sin NUMERO_SERIE",
+                    "columna": columna_ns,
+                    "lote_principal": None
+                })
+
+                fila += 1
+                continue
+
+            numero_serie = str(numero_serie).strip()
+            inicio = fila
+            final = fila
+            siguiente = fila + 1
+
+            while siguiente < len(df_articulo):
+
+                siguiente_ns = df_articulo.iloc[siguiente][columna_ns]
+
+                if es_vacio(siguiente_ns):
+                    break
+
+                if str(siguiente_ns).strip() != numero_serie:
+                    break
+
+                final = siguiente
+                siguiente += 1
+
+            bloques_ns.append((inicio, final, numero_serie))
+            fila = final + 1
+
+        # ========================================================
+        # REVISAR CADA BLOQUE DE NS
+        # ========================================================
+
+        for inicio, final, numero_serie in bloques_ns:
+
+            bloque = df_articulo.iloc[inicio:final + 1]
+
+            # ----------------------------------------------------
+            # ARTÍCULOS QUE NO APLICAN A ESTE NUMERO_SERIE
+            #
+            # Si LOTE + UNID + ALBARAN + PNT están todos vacíos,
+            # se considera correcto y no se revisan esas columnas.
+            # ----------------------------------------------------
+
+            articulos_vacios = set()
+
+            for nombre_articulo in grupos_articulos:
+                if articulo_completamente_vacio(bloque, nombre_articulo):
+                    articulos_vacios.add(nombre_articulo)
+
+            # ====================================================
+            # REVISAR CADA COLUMNA
+            # ====================================================
 
             for columna in df_articulo.columns:
 
-                valor = fila[columna]
+                if columna == columna_ns:
+                    continue
 
-                if es_vacio(valor):
+                nombre_columna = str(columna).strip()
+                articulo_columna = None
 
-                    faltantes.append(
-                        {
-                            "msg":f"En el excel resumen del {articulo} se ha encontrado celdas vacias en la columna {columna} del articulo {lote_principal}",
-                            "columna": columna,
-                            "lote_principal": lote_principal
-                        }
-                    )
+                # ------------------------------------------------
+                # SABER SI LA COLUMNA PERTENECE A UN ARTÍCULO
+                # ------------------------------------------------
+
+                for sufijo in sufijos_articulo:
+                    if nombre_columna.upper().endswith(sufijo):
+                        articulo_columna = nombre_columna[:-len(sufijo)]
+                        break
+
+                # ------------------------------------------------
+                # SI LAS 4 COLUMNAS DE ESE ARTÍCULO ESTÁN VACÍAS,
+                # NO ES UN ERROR: EL ARTÍCULO NO APLICA
+                # ------------------------------------------------
+
+                if articulo_columna in articulos_vacios:
+                    continue
+
+                # ------------------------------------------------
+                # PARA EL RESTO:
+                # SOLO ERROR SI TODAS LAS FILAS DEL MISMO NS
+                # ESTÁN VACÍAS EN ESA COLUMNA
+                # ------------------------------------------------
+
+                valores = bloque[columna].tolist()
+                todos_vacios = all(es_vacio(valor) for valor in valores)
+
+                if todos_vacios:
+
+                    faltantes.append({
+                        "msg": f"En el excel resumen del {articulo} falta información en la columna {columna} del artículo {numero_serie}",
+                        "columna": columna,
+                        "lote_principal": numero_serie
+                    })
 
         return faltantes
 
-    info_faltante.extend(revisar_celdas_vacias(df, "Articulo Principal"))
+    # ========================================================
+    # EJECUTAR REVISIÓN
+    # ========================================================
+
+    info_faltante.extend(revisar_celdas_vacias(df,f"Articulo {dispositivo}" ))
 
     return info_faltante
+
+def localizar_documentacion_batchrecord(dispositivo_br, consola_br, carpeta_documentos=RUTA_ERP, carpeta_pnt=RUTA_PNT, extensiones=(".pdf", ".doc", ".docx", ".xlsx", ".xls", ".xlsm")):
+
+    def cargar_dataframe(fuente):
+        if isinstance(fuente, pd.DataFrame):
+            return fuente.copy()
+        return pd.read_excel(fuente, dtype=object)
+
+    def es_vacio(valor):
+        if pd.isna(valor):
+            return True
+        if isinstance(valor, str):
+            return valor.strip() == ""
+        return False
+
+    def normalizar_valor(valor):
+        if es_vacio(valor):
+            return None
+        if isinstance(valor, float) and valor.is_integer():
+            return str(int(valor))
+        return str(valor).strip()
+
+    def valores_unicos(df, columna):
+        if columna not in df.columns:
+            return []
+
+        resultado = []
+        vistos = set()
+
+        for valor in df[columna]:
+            valor = normalizar_valor(valor)
+
+            if valor is None or valor in vistos:
+                continue
+
+            vistos.add(valor)
+            resultado.append(valor)
+
+        return resultado
+
+    def normalizar_texto(texto):
+        if texto is None:
+            return ""
+
+        texto = unicodedata.normalize("NFKD", str(texto))
+        texto = "".join(caracter for caracter in texto if not unicodedata.combining(caracter))
+        return re.sub(r"[^A-Z0-9]", "", texto.upper())
+
+    def quitar_fecha(referencia):
+        referencia = str(referencia).strip()
+        return re.sub(r"\s+\d{1,2}[\/_-]\d{1,2}[\/_-]\d{2,4}$", "", referencia).strip()
+
+    def extension_valida(archivo):
+        extensiones_validas = {ext.lower() if str(ext).startswith(".") else f".{str(ext).lower()}" for ext in extensiones}
+        return archivo.suffix.lower() in extensiones_validas
+
+    def obtener_proveedor_ruta(ruta):
+        try:
+            ruta_relativa = Path(ruta).resolve().relative_to(Path(carpeta_documentos).resolve())
+            return ruta_relativa.parts[0] if ruta_relativa.parts else None
+        except (ValueError, OSError):
+            return None
+
+    # ========================================================
+    # INDEXAR DOCUMENTOS ERP
+    # ========================================================
+
+    def indexar_carpeta(carpeta):
+        carpeta = Path(carpeta)
+
+        if not carpeta.exists():
+            raise FileNotFoundError(f"No existe la carpeta: {carpeta}")
+
+        archivos = []
+
+        for archivo in carpeta.rglob("*"):
+            if not archivo.is_file() or not extension_valida(archivo):
+                continue
+
+            archivos.append({
+                "ruta": str(archivo),
+                "nombre": archivo.name,
+                "stem": archivo.stem,
+                "stem_normalizado": normalizar_texto(archivo.stem)
+            })
+
+        return archivos
+
+    df_dispositivo = cargar_dataframe(dispositivo_br)
+    df_consola = cargar_dataframe(consola_br)
+
+    archivos_documentos = indexar_carpeta(carpeta_documentos)
+    archivos_pnt = indexar_carpeta(carpeta_pnt)
+
+    # ========================================================
+    # LOCALIZAR CARPETA EXACTA DE I+D PARA UN ARTÍCULO
+    # ========================================================
+
+    def obtener_carpeta_id_articulo(articulo):
+        carpeta_id = Path(carpeta_documentos) / "I+D"
+
+        if not carpeta_id.exists():
+            return None
+
+        carpeta_directa = carpeta_id / articulo
+
+        if carpeta_directa.exists():
+            return carpeta_directa
+
+        # Búsqueda sin distinguir mayúsculas/minúsculas
+        for carpeta in carpeta_id.iterdir():
+            if carpeta.is_dir() and carpeta.name.strip().upper() == str(articulo).strip().upper():
+                return carpeta
+
+        return None
+
+    # ========================================================
+    # BUSCAR ORDEN / OP / ALBARÁN
+    # ========================================================
+
+    def buscar_albaran_op(referencia, tipo, articulo=None):
+        referencia = normalizar_valor(referencia)
+
+        if referencia is None:
+            return []
+
+        # ====================================================
+        # ORDEN INTERNA / OP
+        #
+        # Siempre están en:
+        #
+        # ERP\I+D\<ARTICULO>\
+        #
+        # Se busca únicamente el número inicial.
+        # ====================================================
+
+        if tipo in ("ORDEN", "OP"):
+
+            if articulo is None:
+                return []
+
+            carpeta_articulo = obtener_carpeta_id_articulo(articulo)
+
+            if carpeta_articulo is None:
+                return []
+
+            if tipo == "ORDEN":
+                coincidencia = re.search(r"1//\s*(\d+)", referencia)
+            else:
+                coincidencia = re.match(r"\s*(\d+)", referencia)
+
+            if not coincidencia:
+                return []
+
+            numero = coincidencia.group(1)
+            patron = re.compile(rf"^\s*{re.escape(numero)}(?!\d)")
+            rutas = []
+
+            for archivo in carpeta_articulo.rglob("*"):
+                if not archivo.is_file() or not extension_valida(archivo):
+                    continue
+
+                if patron.search(archivo.stem):
+                    rutas.append(str(archivo))
+
+            return list(dict.fromkeys(rutas))
+
+        # ====================================================
+        # ALBARÁN
+        #
+        # Buscar únicamente sobre el NOMBRE DEL FICHERO.
+        # No sobre toda la ruta.
+        # ====================================================
+
+        referencia_reducida = quitar_fecha(referencia)
+        referencia_normalizada = normalizar_texto(referencia_reducida)
+
+        if not referencia_normalizada:
+            return []
+
+        rutas = []
+
+        for archivo in archivos_documentos:
+            if referencia_normalizada in archivo["stem_normalizado"]:
+                rutas.append(archivo["ruta"])
+
+        return list(dict.fromkeys(rutas))
+
+    # ========================================================
+    # BUSCAR PNT
+    # ========================================================
+
+    def buscar_pnt(referencia):
+        referencia = normalizar_valor(referencia)
+
+        if referencia is None:
+            return []
+
+        rutas = []
+
+        if referencia.isdigit():
+            patron = re.compile(rf"(?<!\d){re.escape(referencia)}(?!\d)")
+
+            for archivo in archivos_pnt:
+                if patron.search(archivo["stem"]):
+                    rutas.append(archivo["ruta"])
+
+        else:
+            referencia_normalizada = normalizar_texto(referencia)
+
+            for archivo in archivos_pnt:
+                if referencia_normalizada in archivo["stem_normalizado"]:
+                    rutas.append(archivo["ruta"])
+
+        return list(dict.fromkeys(rutas))
+
+    # ========================================================
+    # ESTRUCTURA
+    # ========================================================
+
+    estructura = {
+        "componentes": {},
+        "rutas": [],
+        "no_encontrados": []
+    }
+
+    def obtener_componente(articulo):
+        articulo = str(articulo).strip()
+
+        if articulo not in estructura["componentes"]:
+            estructura["componentes"][articulo] = {
+                "albaran_op": [],
+                "resumen": None,
+                "pnt": []
+            }
+
+        return estructura["componentes"][articulo]
+
+    # ========================================================
+    # AÑADIR DOCUMENTO
+    # ========================================================
+
+    def añadir_documento(articulo, campo, tipo, referencia, rutas):
+        componente = obtener_componente(articulo)
+        referencia = normalizar_valor(referencia)
+
+        if referencia is None:
+            return
+
+        if tipo in ("ORDEN", "OP"):
+            proveedores = ["I+D"]
+        else:
+            proveedores = []
+
+            for ruta in rutas:
+                proveedor = obtener_proveedor_ruta(ruta)
+
+                if proveedor and proveedor not in proveedores:
+                    proveedores.append(proveedor)
+
+        for documento in componente[campo]:
+            if documento["tipo"] == tipo and documento["referencia"] == referencia:
+
+                for ruta in rutas:
+                    if ruta not in documento["rutas"]:
+                        documento["rutas"].append(ruta)
+
+                for proveedor in proveedores:
+                    if proveedor not in documento["proveedores"]:
+                        documento["proveedores"].append(proveedor)
+
+                return
+
+        componente[campo].append({
+            "tipo": tipo,
+            "referencia": referencia,
+            "proveedores": proveedores,
+            "rutas": rutas
+        })
+
+    # ========================================================
+    # NO ENCONTRADOS
+    # ========================================================
+
+    def registrar_no_encontrado(articulo, tipo, referencia):
+        referencia = normalizar_valor(referencia)
+
+        for existente in estructura["no_encontrados"]:
+            if existente["articulo"] == articulo and existente["tipo"] == tipo and existente["referencia"] == referencia:
+                return
+
+        proveedor = "I+D" if tipo in ("ORDEN", "OP") else None
+
+        estructura["no_encontrados"].append({
+            "articulo": articulo,
+            "proveedor": proveedor,
+            "tipo": tipo,
+            "referencia": referencia,
+            "msg": f"No se ha localizado el documento {tipo} '{referencia}' del componente '{articulo}'"
+        })
+
+    # ========================================================
+    # OP CONOCIDAS
+    # ========================================================
+
+    ops_dispositivo = valores_unicos(df_dispositivo, "ORDEN DE PRODUCCION")
+    ops_consola = valores_unicos(df_consola, "ORDEN DE PRODUCCION")
+    ops_conocidas = set(ops_dispositivo + ops_consola)
+
+    # ========================================================
+    # PROCESAR COLUMNAS DE LOS DOS DATAFRAMES
+    # ========================================================
+
+    def procesar_dataframe(df):
+
+        columnas_albaran = [columna for columna in df.columns if str(columna).strip().upper().endswith("_ALBARAN")]
+
+        for columna in columnas_albaran:
+            articulo = str(columna).strip()[:-len("_ALBARAN")]
+            obtener_componente(articulo)
+
+            for referencia in valores_unicos(df, columna):
+
+                if str(referencia).strip().startswith("1//"):
+                    tipo = "ORDEN"
+                elif referencia in ops_conocidas:
+                    tipo = "OP"
+                else:
+                    tipo = "ALBARAN"
+
+                rutas = buscar_albaran_op(referencia, tipo, articulo)
+                añadir_documento(articulo, "albaran_op", tipo, referencia, rutas)
+
+                if not rutas:
+                    registrar_no_encontrado(articulo, tipo, referencia)
+
+        columnas_pnt = [columna for columna in df.columns if str(columna).strip().upper().endswith("_PNT")]
+
+        for columna in columnas_pnt:
+            articulo = str(columna).strip()[:-len("_PNT")]
+            obtener_componente(articulo)
+
+            for referencia in valores_unicos(df, columna):
+                rutas = buscar_pnt(referencia)
+                añadir_documento(articulo, "pnt", "PNT", referencia, rutas)
+
+                if not rutas:
+                    registrar_no_encontrado(articulo, "PNT", referencia)
+
+    procesar_dataframe(df_dispositivo)
+    procesar_dataframe(df_consola)
+
+    # ========================================================
+    # AÑADIR OP PRINCIPALES
+    #
+    # Identificamos el artículo buscando qué columna *_ALBARAN
+    # contiene esas OP.
+    # ========================================================
+
+    def buscar_articulo_de_op(df, op):
+        for columna in df.columns:
+            if not str(columna).strip().upper().endswith("_ALBARAN"):
+                continue
+
+            if op in valores_unicos(df, columna):
+                return str(columna).strip()[:-len("_ALBARAN")]
+
+        return None
+
+    for op in ops_dispositivo:
+        articulo = buscar_articulo_de_op(df_dispositivo, op)
+
+        if articulo:
+            rutas = buscar_albaran_op(op, "OP", articulo)
+            añadir_documento(articulo, "albaran_op", "OP", op, rutas)
+
+            if not rutas:
+                registrar_no_encontrado(articulo, "OP", op)
+
+    for op in ops_consola:
+        articulo = buscar_articulo_de_op(df_consola, op)
+
+        if articulo:
+            rutas = buscar_albaran_op(op, "OP", articulo)
+            añadir_documento(articulo, "albaran_op", "OP", op, rutas)
+
+            if not rutas:
+                registrar_no_encontrado(articulo, "OP", op)
+
+    # ========================================================
+    # INFERIR PROVEEDOR DE ALBARANES NO ENCONTRADOS
+    #
+    # Solo se asigna si el artículo tiene UN ÚNICO proveedor
+    # conocido. Nunca se mezclan varios proveedores.
+    # ========================================================
+
+    def obtener_proveedor_articulo(articulo):
+        componente = estructura["componentes"].get(articulo)
+
+        if componente is None:
+            return None
+
+        proveedores = set()
+
+        for documento in componente["albaran_op"]:
+            if documento["tipo"] != "ALBARAN":
+                continue
+
+            for proveedor in documento["proveedores"]:
+                if proveedor:
+                    proveedores.add(proveedor)
+
+        if len(proveedores) == 1:
+            return next(iter(proveedores))
+
+        return None
+
+    for documento in estructura["no_encontrados"]:
+        if documento["tipo"] in ("ORDEN", "OP"):
+            documento["proveedor"] = "I+D"
+        else:
+            documento["proveedor"] = obtener_proveedor_articulo(documento["articulo"]) or "NO IDENTIFICADO"
+
+    # ========================================================
+    # LISTA PLANA DE RUTAS
+    # ========================================================
+
+    rutas_finales = []
+    vistos = set()
+
+    for articulo, componente in estructura["componentes"].items():
+        for campo in ("albaran_op", "pnt"):
+            for documento in componente[campo]:
+                for ruta in documento["rutas"]:
+
+                    clave = (articulo, documento["tipo"], documento["referencia"], ruta)
+
+                    if clave in vistos:
+                        continue
+
+                    vistos.add(clave)
+
+                    rutas_finales.append({
+                        "articulo": articulo,
+                        "tipo": documento["tipo"],
+                        "referencia": documento["referencia"],
+                        "ruta": ruta
+                    })
+
+    estructura["rutas"] = rutas_finales
+
+    # ========================================================
+    # CONTROL FINAL DE INTEGRIDAD
+    #
+    # Una ORDEN/OP no puede apuntar a la carpeta I+D de otro
+    # artículo.
+    # ========================================================
+
+    for articulo, componente in estructura["componentes"].items():
+        for documento in componente["albaran_op"]:
+
+            if documento["tipo"] not in ("ORDEN", "OP"):
+                continue
+
+            rutas_correctas = []
+
+            for ruta in documento["rutas"]:
+                partes = [parte.upper() for parte in Path(ruta).parts]
+
+                if "I+D" not in partes:
+                    continue
+
+                indice = partes.index("I+D")
+
+                if indice + 1 < len(partes) and partes[indice + 1] == articulo.upper():
+                    rutas_correctas.append(ruta)
+
+            documento["rutas"] = rutas_correctas
+
+    return estructura
+
+def buscar_saltos_numeros_serie(directorio):
+
+    def obtener_ultimos_4(numero_serie):
+        if pd.isna(numero_serie):
+            return None
+
+        texto = str(numero_serie).strip()
+
+        if texto.endswith(".0"):
+            texto = texto[:-2]
+
+        numeros = re.findall(r"\d", texto)
+
+        if len(numeros) < 4:
+            return None
+
+        return int("".join(numeros[-4:]))
+
+
+    def convertir_a_rangos(numeros_faltantes):
+        if not numeros_faltantes:
+            return []
+
+        rangos = []
+        inicio = numeros_faltantes[0]
+        anterior = numeros_faltantes[0]
+
+        for numero in numeros_faltantes[1:]:
+            if numero == anterior + 1:
+                anterior = numero
+                continue
+
+            rangos.append((inicio, anterior))
+            inicio = numero
+            anterior = numero
+
+        rangos.append((inicio, anterior))
+
+        return rangos
+
+
+    def rangos_a_texto(rangos):
+        textos = []
+
+        for inicio, fin in rangos:
+            if inicio == fin:
+                textos.append(f"{inicio:04d}")
+            else:
+                textos.append(f"{inicio:04d}-{fin:04d}")
+
+        return ", ".join(textos)
+
+
+    directorio = Path(directorio)
+    resultados = []
+
+    extensiones = {".xlsx", ".xlsm", ".xls"}
+
+    archivos = [archivo for archivo in directorio.rglob("*") if archivo.is_file() and "_RESUMEN" in archivo.stem.upper() and archivo.suffix.lower() in extensiones and not archivo.name.startswith("~$")]
+
+    for archivo in archivos:
+
+        articulo = archivo.parent.name
+
+        try:
+            excel = pd.ExcelFile(archivo)
+        except Exception as e:
+            print(f"No se ha podido abrir {archivo}: {e}")
+            continue
+
+        for hoja in excel.sheet_names:
+
+            try:
+                df = pd.read_excel(archivo, sheet_name=hoja, dtype=object)
+            except Exception as e:
+                print(f"No se ha podido leer {archivo} - {hoja}: {e}")
+                continue
+
+            columnas = {str(columna).strip().upper(): columna for columna in df.columns}
+
+            if "NUMERO_SERIE" not in columnas:
+                continue
+
+            columna_ns = columnas["NUMERO_SERIE"]
+
+            numeros = []
+
+            for numero_serie in df[columna_ns]:
+                numero = obtener_ultimos_4(numero_serie)
+
+                if numero is not None:
+                    numeros.append(numero)
+
+            numeros = sorted(set(numeros))
+
+            if len(numeros) < 2:
+                continue
+
+            numero_inicial = numeros[0]
+            numero_final = numeros[-1]
+
+            existentes = set(numeros)
+            faltantes = [numero for numero in range(numero_inicial, numero_final + 1) if numero not in existentes]
+            rangos = convertir_a_rangos(faltantes)
+
+            if not rangos:
+                continue
+
+            resultados.append({
+                "articulo": articulo,
+                "rango_existente": f"{numero_inicial:04d}-{numero_final:04d}",
+                "saltos": rangos_a_texto(rangos),
+                "archivo": str(archivo)
+            })
+
+    return resultados
 
 DF_PNT = leer_excel_PNTs()
 dic_config = leer_configuracion()
 
 if __name__ == "__main__":
-
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ CREAR PDF ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━═════════════════════════════════════════════════════════════════════════════┛
-
-    # rec = obtener_requisitos_especiales("EPTEV02DEV02","0000","0575")
-    # bachredord = GeneradorBatchRecord("BATCH_RECORD_EPTE.pdf")
-    # bachredord.page_crear_portada(
-
-    #     lote="XXXX",
-
-    #     dispositivo="EPTEV02DEV02",
-
-    #     ns_inicio="EPB1230001",
-    #     ns_final="EPB1230090",
-
-    #     software_version="4643_3385",
-
-    #     requisitos_especiales=rec,
-
-    #     preparado_por="Victoria E. González Gutiérrez",
-    #     cargo_preparado="Regulatory Responsible",
-
-    #     revisado_por="Victoria E. González Gutiérrez",
-    #     cargo_revisado="Quality Manager",
-
-    #     aprobado_por="Josep Oliver Garcia",
-    #     cargo_aprobado="Manager",
-
-    #     fecha_preparado="2024/02/15",
-    #     fecha_revisado="2024/02/15",
-    #     fecha_aprobado="2024/02/15",
-    # )
-    # bachredord.page_crear_indice()
-    # bachredord.guardar()
-
+        
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ PROCESAR TRAZABILIDAD Y DOCUMENTACION ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━═════════════════════════════════════════════════════════════════════════════┛
 
     articulos_IMD = os.listdir(RUTA_IMD)      # Todos los articulos 
-    articulos_IMD = ['EPTEV02DEV01']        # Elegir manualmente los articulos
+    articulos_IMD = ['CABLEPLANO']        # Elegir manualmente los articulos
 
     articulos_procesados = [] # Lista que contiene los articulos ya procesados
     articulos_pendientes = articulos_IMD.copy()
+    print("\n Combirtiendo lotes a PDF")
+
+    consulta = input(f"\nQuieres regenerar los .pdf de los LOTES de materias NO fabricadas Tarda MUCHO? (S/N): ")
+
+    if consulta.capitalize() != "S":
+        convertir_excels_lotes_erp_a_pdf() # Recorre todos los excels de ERP menos los de I+D y lso combierte a PDF
 
     for i in INDICE_ARTICULOS:
 
@@ -4835,6 +6138,7 @@ if __name__ == "__main__":
             #     break # No procesamos aun la materia prima de nivel 1
 
             if articulo in articulos_IMD:
+                
                 print("Procesando el articulo: ",articulo)
                 articulos_procesados.append(articulo)
                 articulos_pendientes.remove(articulo)
@@ -4872,6 +6176,7 @@ if __name__ == "__main__":
                     lista_dataframes_ordenes.append(df_resumen)
                 
                 if MODO_RESET: # Fuerza que se procesen todas las carpetas de ordenes desde 0
+
                     lista_dataframes_ordenes = [] # Limpiamos la lista
                     ordenes_procesadas = []
                     ruta_resumen = ruta_carpeta_articulo / f"{articulo}_RESUMEN.xlsx"
@@ -4889,7 +6194,7 @@ if __name__ == "__main__":
                         ruta_pdf = str(Path(ruta_orden_excel).with_suffix(".pdf"))
                         if not Path(ruta_pdf).exists():
                             print(f"Generando PDF de la orden {ruta_orden_excel.name}...")
-                            convertir_excel_a_pdf(ruta_orden_excel)
+                            convertir_orden_excel_a_pdf(ruta_orden_excel)
                         else:
                             print(f"El PDF de la orden {ruta_orden_excel.name} ya existe, no se generará de nuevo.")
 
@@ -4901,6 +6206,12 @@ if __name__ == "__main__":
                 # Guardamos el dataframe en el excel resumen del artuculo
                 df_resumen.to_excel(ruta_resumen, index=False)
 
+                ruta_excel_formateado = ruta_resumen.with_name(f"{ruta_resumen.stem}_formateado{ruta_resumen.suffix}")
+                print(f"\nFormateando resumen excel del articulo {articulo} ...")
+                formatear_resumen_excel(ruta_resumen, ruta_salida = ruta_excel_formateado, hoja=None, device = articulo)
+                print(f"\nImprimiendo resumen excel del articulo {articulo} ...")
+                excel_resumen_a_pdf_una_hoja(ruta_excel_formateado)
+
     # Guardamos el dataframe en el excel resumen del artuculo
     df_errores = pd.DataFrame(set(lista_errores))
     df_errores.to_excel(
@@ -4911,58 +6222,165 @@ if __name__ == "__main__":
     print('\nSe han procesado los articulos:',articulos_procesados)
     print('\nQuedan pendientes de procesar:',articulos_pendientes,'\n')
     time.sleep(2)
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ PROCESAMOS EL BACHRECORD ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━═════════════════════════════════════════════════════════════════════════════┛
 
-    # PRIMER PEDIMOS LOS NUMEROS DE SERIE DEL BACHRECORD QUE SE QUIERE GENERAR
+
+    # saltos = buscar_saltos_numeros_serie(RUTA_IMD)
+    # if saltos:
+    #     print("\nSALTOS DE NUMERACIÓN DETECTADOS:\n")
+
+    #     for resultado in saltos:
+    #         print(f'{resultado["articulo"]}: {resultado["saltos"]}')
+
+    #     consulta = input(f"\nSe detectaron OP faltantes que causan saltos de numeros de serie que se muestran más arriba , quieres continuar realizando el BachRecord?(S/N): ")
+    #     if consulta.capitalize() != "S":
+    #         raise ValueError(
+    #             f"Se termino la ejecucion del bachrecord por falta de informacion en en las ordenes de produccion" )
     
-    # procesar = input("Quiere procesar el bachrecord de un dispositivo? (S/N): ").strip().lower() # TODO DESCOMENTAR AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-    procesar = "s"# TODO BORRAR AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    # # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ PROCESAMOS INFORMACION EXCLUSIVA DEL BACHRECORD ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━═════════════════════════════════════════════════════════════════════════════┛
+    # # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-    if procesar == "s":
+    # # PRIMER PEDIMOS LOS NUMEROS DE SERIE DEL BACHRECORD QUE SE QUIERE GENERAR
+    
+    # # procesar = input("Quiere procesar el bachrecord de un dispositivo? (S/N): ").strip().lower() # TODO DESCOMENTAR AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    # procesar = "s"# TODO BORRAR AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 
-        # dispositivo = input("Introduzca el nombre del dispositivo: ").strip()# TODO DESCOMENTAR AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-        dispositivo = "EPTEV02DEV01"# TODO BORRAR  AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    # if procesar == "s":
 
-        while dispositivo not in DISPOSITIVOS:
-            print(f"El dispositivo '{dispositivo}' no es válido. Los dispositivos : {', '.join(DISPOSITIVOS)}")
-            dispositivo = input("Introduzca el nombre del dispositivo: ").strip()
+    #     # dispositivo = input("Introduzca el nombre del dispositivo: ").strip()# TODO DESCOMENTAR AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    #     dispositivo = "EPTEV02DEV01"# TODO BORRAR  AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 
-        # Obtenemos el DataFrame del resumen de la orden de producción del dispositivo
-        ruta_carpeta_articulo =  Path(RUTA_IMD + dispositivo +'/')
-        df_resumen, _, _ = leer_excel_resumen(ruta_carpeta_articulo)
-        ns_producidos = (df_resumen["NUMERO_SERIE"].dropna().astype(str).unique().tolist())
+    #     while dispositivo not in DISPOSITIVOS:
+    #         print(f"El dispositivo '{dispositivo}' no es válido. Los dispositivos : {', '.join(DISPOSITIVOS)}")
+    #         dispositivo = input("Introduzca el nombre del dispositivo: ").strip()
+
+    #     # Obtenemos el DataFrame del resumen de la orden de producción del dispositivo
+    #     ruta_carpeta_articulo =  Path(RUTA_IMD + dispositivo +'/')
+    #     df_resumen, _, _ = leer_excel_resumen(ruta_carpeta_articulo)
+    #     ns_producidos = (df_resumen["NUMERO_SERIE"].dropna().astype(str).unique().tolist())
         
-        ns_inicio_br = "EPB1260900" # TODO BORRAR  AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-        ns_final_br = "EPB1260950" # TODO BORRAR  AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    #     ns_inicio_br = "EPB1250384" # TODO BORRAR  AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    #     ns_final_br = "EPB1260953" # TODO BORRAR  AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 
-        # ns_inicio_br = input("Introduzca el número de serie inicial: ").strip()
-        # while ns_inicio_br not in ns_producidos:
-        #     print(f"El número de serie '{ns_inicio_br}' no es válido. Los números de serie estan comprendidos entre: {ns_producidos[0]} y {ns_producidos[-1]}")
-        #     ns_inicio_br = input("Introduzca el número de serie inicial: ").strip()
+    #     # ns_inicio_br = input("Introduzca el número de serie inicial: ").strip()
+    #     # while ns_inicio_br not in ns_producidos:
+    #     #     print(f"El número de serie '{ns_inicio_br}' no es válido. Los números de serie estan comprendidos entre: {ns_producidos[0]} y {ns_producidos[-1]}")
+    #     #     ns_inicio_br = input("Introduzca el número de serie inicial: ").strip()
 
-        # ns_final_br = input("Introduzca el número de serie final: ").strip()
-        # while ns_final_br not in ns_producidos or ns_final_br < ns_inicio_br:
-        #     if ns_final_br < ns_inicio_br:
-        #         print(f"El número de serie final '{ns_final_br}' no puede ser menor que el número de serie inicial '{ns_inicio_br}'.")
-        #     elif ns_final_br not in ns_producidos:
-        #         print(f"El número de serie '{ns_final_br}' no es válido. Los números de serie estan comprendidos entre: {ns_producidos[0]} y {ns_producidos[-1]}")
-        #     ns_final_br = input("Introduzca el número de serie final: ").strip()
-
-        # A PARTIR DE ESTE PUNTO YA TENEMOS EL DISPOSITIVO Y LOS NUMEROS DE SERIE QUE SE QUIEREN PROCESAR PARA EL BACHRECORD
-        df_dispoitivoBR = filtrar_filas_entre_valores(df_resumen, "NUMERO_SERIE", ns_inicio_br, ns_final_br) # Nos quedamos unicamente con los ns que queremos para el bachredord
-        df_dispoitivoBR = eliminar_articulos_vacios_df(df_dispoitivoBR) # Eliminamos los articulos vacios que se generan por culpa de haber cambiado las estructuras de las producciones
-        df_dispoitivoBR.to_excel('./temp/dispositivoBR_temp.xlsx', index=False)# guardamos en excel si queremos consultar algo
-
-        info_faltante = revisa_informacion_bachrecord(df_dispoitivoBR)
+    #     # ns_final_br = input("Introduzca el número de serie final: ").strip()
+    #     # while ns_final_br not in ns_producidos or ns_final_br < ns_inicio_br:
+    #     #     if ns_final_br < ns_inicio_br:
+    #     #         print(f"El número de serie final '{ns_final_br}' no puede ser menor que el número de serie inicial '{ns_inicio_br}'.")
+    #     #     elif ns_final_br not in ns_producidos:
+    #     #         print(f"El número de serie '{ns_final_br}' no es válido. Los números de serie estan comprendidos entre: {ns_producidos[0]} y {ns_producidos[-1]}")
+    #     #     ns_final_br = input("Introduzca el número de serie final: ").strip()
 
 
-        for error in info_faltante:
-            print(error["msg"])
-        time.sleep(5)
-        # Antes de formatear el excel nos aseguraamos de que todo el contenido que necesitmaos esta
-        formatear_resumen_excel('./temp/dispositivoBR_temp.xlsx', ruta_salida='./temp/tempfiltrado.xlsx', hoja=None)
-        print("Archivo temporal filtrado y formateado guardado en './temp/tempfiltrado.xlsx'.")
-        # FILTRAMOS EL EXCEL RESUMEN DEL DISPOSITIVO A LOS NUMEROS DE SERIE QUE NOS INTERESA
 
-    # LUEGO SE COMPRUEBA QUE LA INFORMACION ESTA COMPLETA, EN CASO CONTRARIO SE DICE QUE INFORMACION FALTA
-    # POR ULTIMO GENERAMOS EL DOCUMENTO PDF BACHREORD CON LOS NUMEROS DE SERIE SOLICITADOS
+    #     # A PARTIR DE ESTE PUNTO YA TENEMOS EL DISPOSITIVO Y LOS NUMEROS DE SERIE QUE SE QUIEREN PROCESAR PARA EL BACHRECORD
+    #     df_dispoitivoBR = filtrar_filas_entre_valores(df_resumen, "NUMERO_SERIE", ns_inicio_br, ns_final_br) # Nos quedamos unicamente con los ns que queremos para el bachredord
+    #     df_dispoitivoBR = eliminar_articulos_vacios_df(df_dispoitivoBR) # Eliminamos los articulos vacios que se generan por culpa de haber cambiado las estructuras de las producciones
+    #     df_dispoitivoBR.to_excel('./temp/DispositivoBR_temp.xlsx', index=False)# guardamos en excel si queremos consultar algo
+
+    #     info_faltante = revisa_informacion_bachrecord(df_dispoitivoBR, dispositivo)
+
+    #     if info_faltante:
+    #         for error in info_faltante:
+    #             print(error["msg"])
+
+    #         consulta = input(f"\nSe detecto informacion faltante en el resumen principal puedes revisar la informacion en './temp/DispositivoBR_temp.xlsx', quieres continuar realizando el BachRecord? (S/N): ")
+    #         if consulta.capitalize() != "S":
+    #             raise ValueError(
+    #                 f"Se termino la ejecucion del bachrecord por falta de informacion en './temp/DispositivoBR_temp.xlsx'" )
+
+
+
+    #     # Antes de formatear el excel nos hemos aseguraamos de que todo el contenido que necesitmaos esta
+    #     formatear_resumen_excel('./temp/DispositivoBR_temp.xlsx', ruta_salida='./temp/DispTempFiltrado.xlsx', hoja=None, device = dispositivo)
+    #     print("Archivo temporal filtrado y formateado guardado en './temp/DispTempFiltrado.xlsx'.")
+
+    #     # REPRETIMOS EL PROCESO ANTERIOR CON LA CONSOLA
+    #     consola = DISPOSITIVO_CONSOLA[dispositivo]
+
+    #     ruta_excel_consola =  RUTA_IMD + consola +"/"+ f"{consola}_RESUMEN.xlsx" 
+    #     df_consola = pd.read_excel(ruta_excel_consola)
+
+    #     df_consolaBR = filtrar_filas_entre_valores(df_consola, "NUMERO_SERIE", ns_inicio_br, ns_final_br) # Nos quedamos unicamente con los ns que queremos para el bachredord
+    #     df_consolaBR = eliminar_articulos_vacios_df(df_consolaBR) # Eliminamos los articulos vacios que se generan por culpa de haber cambiado las estructuras de las producciones
+    #     df_consolaBR.to_excel('./temp/ConsolaBR_temp.xlsx', index=False) # Guardamos en excel si queremos consultar algo
+
+    #     info_faltante = revisa_informacion_bachrecord(df_consolaBR, consola)
+
+    #     if info_faltante:
+    #         for error in info_faltante:
+    #             print(error["msg"])
+
+    #         consulta = input(f"\nSe detecto informacion faltante en el resumen principal de la consola puedes revisar la informacion en './temp/ConsolaBR_temp.xlsx', quieres continuar realizando el BachRecord? (S/N): ")
+    #         if consulta.capitalize() != "S":
+    #             raise ValueError(
+    #                 f"Se termino la ejecucion del bachrecord por falta de informacion en el resumen principal de la consola './temp/ConsolaBR_temp.xlsx' " )
+
+
+    #     # Antes de formatear el excel nos aseguraamos de que todo el contenido que necesitmaos esta
+    #     formatear_resumen_excel('./temp/ConsolaBR_temp.xlsx', ruta_salida='./temp/ConsolaTempFiltrado.xlsx', hoja=None, device = consola)
+    #     print("Archivo temporal filtrado y formateado guardado en './temp/ConsolaTempFiltrado.xlsx'.")
+
+    #     estructura_documental = localizar_documentacion_batchrecord(dispositivo_br=df_dispoitivoBR,consola_br=df_consolaBR,)
+
+            
+    #     if estructura_documental["no_encontrados"]:
+
+    #         print("\nHAY DOCUMENTOS NO ENCONTRADOS:")
+
+    #         for documento in estructura_documental["no_encontrados"]:
+    #             print(f'{documento["articulo"]} - {documento["proveedor"]} - {documento["tipo"]} - {documento["referencia"]}')
+
+    #     else:
+
+    #         print("Se ha localizado toda la documentación.")
+
+    guardar_diccionario(estructura_documental)
+    print("Estructura documental guardada correctamente")
+
+    estructura_documental = cargar_diccionario()
+
+    # for valor in estructura_documental["componentes"]["PHB1V01"]['albaran_op']:
+
+    #     # pprint(clave)
+    #     pprint(valor['rutas'])
+    #     time.sleep(1)
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ CREAR PDF ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━═════════════════════════════════════════════════════════════════════════════┛
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    # rec = obtener_requisitos_especiales("EPTEV02DEV02","0000","0575")
+    # bachredord = GeneradorBatchRecord("BATCH_RECORD_EPTE.pdf")
+    # bachredord.page_crear_portada(
+
+    #         lote="XXXX",
+
+    #         dispositivo="EPTEV02DEV02",
+
+    #         ns_inicio="EPB1230001",
+    #         ns_final="EPB1230090",
+
+    #         software_version="4643_3385",
+
+    #         requisitos_especiales=rec,
+
+    #         preparado_por="Victoria E. González Gutiérrez",
+    #         cargo_preparado="Regulatory Responsible",
+
+    #         revisado_por="Victoria E. González Gutiérrez",
+    #         cargo_revisado="Quality Manager",
+
+    #         aprobado_por="Josep Oliver Garcia",
+    #         cargo_aprobado="Manager",
+
+    #         fecha_preparado="2024/02/15",
+    #         fecha_revisado="2024/02/15",
+    #         fecha_aprobado="2024/02/15",
+    #     )
+    # bachredord.page_crear_indice()
+    # bachredord.guardar()
