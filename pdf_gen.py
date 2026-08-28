@@ -35,6 +35,7 @@ RUTA_PNT =  RUTA_RAIZ +'PNT MDR/PNT.7.5-02_CONTROL DE CALIDAD/Registros MDR'
 RUTA_PNT_EXCEL = RUTA_RAIZ +'PNT MDR/PNT.7.5-02_CONTROL DE CALIDAD/Registros MDR/REG.7.5-02-02_CONTROL PNT.xlsx'
 RUTA_CONFIG ='./config/config.xlsx'
 RUTA_ETIQUETAS = './data/IMPRESION_ETIQUETAS/' # PARA LOS REQUISITOS ESPECIALES DEL BACH RECORD DISPOSITIVOS FUERA DE ESPAÑA
+RUTA_PDF_BLANCO = './config/hoja_en_blanco.pdf'
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ COLORES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 
@@ -1776,6 +1777,7 @@ def cargar_diccionario(ruta="./temp/estructura_documental.pkl"):
 
 if __name__ == "__main__":
 
+    lista_errores_final = []
     estructura_documental = cargar_diccionario()
     dispositivo = "EPTEV02DEV01"
     bachredord = GeneradorBatchRecord("BATCH_RECORD_EPTE.pdf")
@@ -1866,7 +1868,12 @@ if __name__ == "__main__":
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ TRAZABILIDAD DE IONCLINICS / IONCLINICS TRACEABILITY ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━═════════════════════════════════════════════════════════════════════════════┛
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
+    
+    # Recopilamos información necesaria:
+    articulos_bachrecord = [articulo for articulo in estructura_documental["componentes"]]
+    articulos_imd = [carpeta.name for carpeta in Path(RUTA_IMD).iterdir() if carpeta.is_dir()]
+    accesorios_IMD = [articulo for articulo in estructura_documental["componentes"] if articulo in articulos_imd]
+    accesorios_IMD.remove(dispositivo)
     
     bachredord.page_crear_separador_seccion("TRAZABILIDAD DE IONCLINICS / IONCLINICS TRACEABILITY", indice=1, numero="3")
 
@@ -1888,17 +1895,54 @@ if __name__ == "__main__":
         contexto="TRAZABILIDAD DE IONCLINICS / IONCLINICS TRACEABILITY"
     )
 
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Dispositivo ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    i3 = 1
     bachredord.page_crear_separador_seccion(
         "Dispositivo / Device",
         indice=3,
-        descripcion='''Ordenes de producción obtenidas del programa ERP del dispositivo ensamblado. Une la trazabilidad de la
+        descripcion=f'''Ordenes de producción obtenidas del programa ERP del dispositivo {dispositivo} ensamblado. Une la trazabilidad de la
                     consola y los accesorios del dispositivo. / Production orders obtained from the ERP software of the
-                    assembled device. Links the traceability of the console and device accessories.''',
-        numero="3.2.1",
+                    assembled device {dispositivo}. Links the traceability of the console and device accessories.''',
+        numero=f"3.2.{i3}",
         contexto="TRAZABILIDAD DE IONCLINICS / IONCLINICS TRACEABILITY"
     )
 
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Accesorios / Accessories
+    # AÑADIMOS EL PDF AL BACHRECORD
+    ruta_resumen_articulo = estructura_documental['componentes'][dispositivo]["resumen"]
+    if ruta_resumen_articulo:
+        bachredord.page_añadir_pdf(ruta_resumen_articulo)
+    else:
+        bachredord.page_añadir_pdf(RUTA_PDF_BLANCO)
+        lista_errores_final.append(f"No se añadio la hoja resumen del dispositivo {dispositivo} en la seccion 3.2.{i3} ")
+
+    i3+=1
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Consola en caso de tenerla ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    consola =  next((articulo for articulo in accesorios_IMD if "_CON" in articulo), None)
+
+    if consola is not None:
+        accesorios_IMD.remove(consola)
+        bachredord.page_crear_separador_seccion(
+            "Consola / Console",
+            indice=3,
+            descripcion=f'''Ordenes de producción de la consola {consola}, obtenidas del programa ERP del dispositivo ensamblado. Une la trazabilidad de la
+                        consola con los accesorios del dispositivo. / Production orders for the {consola}, obtained from the ERP system for the assembled device. Links the traceability of the
+                        console to the device’s accessories.''',
+            numero=f"3.2.{i3}",
+            contexto="TRAZABILIDAD DE IONCLINICS / IONCLINICS TRACEABILITY"
+        )
+        i3+=1
+
+        ruta_resumen_articulo = estructura_documental['componentes'][consola]["resumen"]
+        if ruta_resumen_articulo:
+            bachredord.page_añadir_pdf(ruta_resumen_articulo)
+        else:
+            bachredord.page_añadir_pdf(RUTA_PDF_BLANCO)
+            lista_errores_final.append(f"No se añadio la hoja resumen del articulo {consola} en la seccion3.2.{i3} ")
+
+        
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ Accesorios / Accessories ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     bachredord.page_crear_separador_seccion(
         "Accesorios / Accessories",
@@ -1906,27 +1950,30 @@ if __name__ == "__main__":
         descripcion='''Ordenes de producción obtenidas del programa ERP del dispositivo ensamblado. Une la trazabilidad de la
                     consola y los accesorios del dispositivo. / Production orders obtained from the ERP software of the
                     assembled device. Links the traceability of the console and device accessories.''',
-        numero="3.2.2",
+        numero=f"3.2.{i3}",
         contexto="TRAZABILIDAD DE IONCLINICS / IONCLINICS TRACEABILITY"
     )
 
-
-    articulos_bachrecord = [articulo for articulo in estructura_documental["componentes"]]
-    articulos_imd = [carpeta.name for carpeta in Path(RUTA_IMD).iterdir() if carpeta.is_dir()]
-    accesorios_IMD = [articulo for articulo in estructura_documental["componentes"] if articulo in articulos_imd]
-    accesorios_IMD.remove(dispositivo)
     i = 0
     for accesorio in accesorios_IMD:
 
+        # CREAMOS EL SEPRADOR DE LA SECCION 
         bachredord.page_crear_separador_seccion(
             f"{accesorio} / {accesorio}",
             indice=4,
             numero=f"3.2.2.{str(i)}",
             contexto=f"TRAZABILIDAD DE IONCLINICS / IONCLINICS TRACEABILITY"
         )
-        bachredord.page_añadir_pdf("data\PNT MDR\ERP\I+D\CABLEPLANO\CABLEPLANO_RESUMEN_formateado.pdf") #TODO PONER LO QUE TOQUE
-        i +=1
 
+        # AÑADIMOS EL PDF AL BACHRECORD
+        ruta_resumen_articulo = estructura_documental['componentes'][accesorio]["resumen"]
+        if ruta_resumen_articulo:
+            bachredord.page_añadir_pdf(ruta_resumen_articulo)
+        else:
+            bachredord.page_añadir_pdf(RUTA_PDF_BLANCO)
+            lista_errores_final.append(f"No se añadio la hoja resumen del articulo {accesorio} en la seccion 3.2.2.{str(i)} ")
+
+        i +=1
 
     # bachredord.page_crear_separador_seccion(
     #     "Lotes / Batches",
@@ -1938,3 +1985,10 @@ if __name__ == "__main__":
 
     bachredord.page_crear_indice()
     bachredord.guardar()
+
+    print("BACHRECORD CREADO -------------------------------------------------------------------------------------------")
+    time.sleep(1)
+    print("\n")
+    for e in lista_errores_final:
+        print(e)
+    time.sleep(10)

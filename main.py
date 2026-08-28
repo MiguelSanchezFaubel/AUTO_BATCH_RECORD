@@ -19,15 +19,24 @@ from pathlib import Path
 import unicodedata
 import pythoncom
 import win32com.client as win32
+import win32print
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment,Font, Alignment
 from openpyxl.utils import get_column_letter
 from openpyxl.cell.cell import MergedCell
 from openpyxl.styles import Border, Side
 import pickle
-
 from pprint import pprint
 from pdf_gen import *
+
+import winreg
+import win32com.client
+import win32print
+
+from pypdf import PdfReader, PdfWriter, PageObject, Transformation
+from reportlab.lib.pagesizes import A4
+
+import os
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ "COMPILACION" ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 
@@ -50,6 +59,7 @@ RUTA_PNT =  RUTA_RAIZ +'PNT MDR/PNT.7.5-02_CONTROL DE CALIDAD/Registros MDR'
 RUTA_PNT_EXCEL = RUTA_RAIZ +'PNT MDR/PNT.7.5-02_CONTROL DE CALIDAD/Registros MDR/REG.7.5-02-02_CONTROL PNT.xlsx'
 RUTA_CONFIG ='./config/config.xlsx'
 RUTA_ETIQUETAS = './data/IMPRESION_ETIQUETAS/' # PARA LOS REQUISITOS ESPECIALES DEL BACH RECORD DISPOSITIVOS FUERA DE ESPAÑA
+RUTA_PDF_BLANCO = './config/hoja_en_blanco.pdf'
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ GLOBALES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -100,6 +110,8 @@ def convertir_excels_lotes_erp_a_pdf(carpeta_erp=RUTA_ERP):
                 continue
 
             if "LOTES" not in ruta_excel.stem.upper():
+                continue
+            if "_FORMATEADO" not in ruta_excel.stem.upper():
                 continue
 
             try:
@@ -327,26 +339,6 @@ def obtener_unico_excel(directorio):
     return excels[0]
 
 def excel_resumen_a_pdf_una_hoja(ruta_excel, ruta_pdf=None, hoja=None, horizontal=True):
-    """
-    Convierte una hoja Excel en un PDF de una única página.
-
-    Detecta automáticamente:
-        - última fila con información
-        - última columna con información
-
-    Solo imprime el rango realmente utilizado y fuerza todo el contenido
-    a una única página PDF.
-
-    Parámetros:
-        ruta_excel : ruta del Excel.
-        ruta_pdf   : ruta del PDF de salida. Si es None usa el mismo nombre.
-        hoja       : nombre de la hoja. Si es None usa la primera.
-        horizontal : True -> horizontal, False -> vertical.
-
-    Devuelve:
-        Ruta del PDF generado.
-    """
-
     ruta_excel = Path(ruta_excel).resolve()
 
     if not ruta_excel.exists():
@@ -361,11 +353,33 @@ def excel_resumen_a_pdf_una_hoja(ruta_excel, ruta_pdf=None, hoja=None, horizonta
 
     excel = None
     libro = None
+    impresora_original = None
 
     try:
-        excel = win32.DispatchEx("Excel.Application")
+        # ========================================================
+        # GUARDAR IMPRESORA ACTUAL Y UTILIZAR MICROSOFT PRINT TO PDF
+        # ========================================================
+
+        impresora_original = win32print.GetDefaultPrinter()
+
+        impresoras = [impresora[2] for impresora in win32print.EnumPrinters(win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS)]
+
+        impresora_pdf = next((nombre for nombre in impresoras if "MICROSOFT PRINT TO PDF" in nombre.upper()), None)
+
+        if impresora_pdf:
+            win32print.SetDefaultPrinter(impresora_pdf)
+
+        # ========================================================
+        # ABRIR EXCEL
+        # ========================================================
+
+        excel = win32com.client.DispatchEx("Excel.Application")
         excel.Visible = False
         excel.DisplayAlerts = False
+
+        # ========================================================
+        # PRIMERO ABRIR EL LIBRO
+        # ========================================================
 
         libro = excel.Workbooks.Open(str(ruta_excel))
 
@@ -374,41 +388,64 @@ def excel_resumen_a_pdf_una_hoja(ruta_excel, ruta_pdf=None, hoja=None, horizonta
         else:
             ws = libro.Worksheets(hoja)
 
+        ws.Activate()
+        ruta_registro = r"Software\Microsoft\Windows NT\CurrentVersion\Devices"
+        nombre_impresora_pdf = "Microsoft Print to PDF"
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, ruta_registro) as clave:
+            valor, _ = winreg.QueryValueEx(clave, nombre_impresora_pdf)
+
+        puerto_excel = valor.split(",")[-1].strip()
+
+        if not puerto_excel.endswith(":"):
+            puerto_excel += ":"
+
+        impresora_excel = f"{nombre_impresora_pdf} en {puerto_excel}"
+
+        print(f"IMPRESORA ACTUAL EXCEL: {excel.ActivePrinter}")
+        print(f"Intentando configurar Excel con: {impresora_excel}")
+
+        excel.ActivePrinter = impresora_excel
+
+        print(f"IMPRESORA ACTIVA EN EXCEL: {excel.ActivePrinter}")
         # ========================================================
-        # LOCALIZAR ÚLTIMA FILA CON INFORMACIÓN REAL
+        # ÚLTIMA FILA Y COLUMNA CON INFORMACIÓN
         # ========================================================
 
-        ultima_celda_fila = ws.Cells.Find(What="*", After=ws.Cells(1, 1), LookAt=1, LookIn=-4123, SearchOrder=1, SearchDirection=2, MatchCase=False)
+        # ultima_celda_fila = ws.Cells.Find(What="*", After=ws.Cells(1, 1), LookIn=-4123, SearchOrder=1, SearchDirection=2)
+        # ultima_celda_columna = ws.Cells.Find(What="*", After=ws.Cells(1, 1), LookIn=-4123, SearchOrder=2, SearchDirection=2)
 
-        # ========================================================
-        # LOCALIZAR ÚLTIMA COLUMNA CON INFORMACIÓN REAL
-        # ========================================================
+        # if ultima_celda_fila is None or ultima_celda_columna is None:
+        #     raise ValueError(f"La hoja '{ws.Name}' no contiene información.")
+        
+        rango_usado = ws.UsedRange
 
-        ultima_celda_columna = ws.Cells.Find(What="*", After=ws.Cells(1, 1), LookAt=1, LookIn=-4123, SearchOrder=2, SearchDirection=2, MatchCase=False)
+        ultima_fila = rango_usado.Row + rango_usado.Rows.Count - 1
+        ultima_columna = rango_usado.Column + rango_usado.Columns.Count - 1
 
-        if ultima_celda_fila is None or ultima_celda_columna is None:
-            raise ValueError(f"La hoja '{ws.Name}' no contiene información.")
-
-        ultima_fila = ultima_celda_fila.Row
-        ultima_columna = ultima_celda_columna.Column
-
-        # ========================================================
-        # ÁREA DE IMPRESIÓN
-        # ========================================================
+        print(f"ULTIMA FILA: {ultima_fila}")
+        print(f"ULTIMA COLUMNA: {ultima_columna}")
+        print(f"RANGO: A1:{ws.Cells(ultima_fila, ultima_columna).Address.replace('$', '')}")
 
         rango = ws.Range(ws.Cells(1, 1), ws.Cells(ultima_fila, ultima_columna))
-        ws.PageSetup.PrintArea = rango.Address
 
         # ========================================================
-        # CONFIGURACIÓN DE PÁGINA
+        # EXPORTAR
         # ========================================================
+        
+        ws.Activate()
+        ws.ResetAllPageBreaks()
+
+        excel.PrintCommunication = False
+
+        ws.PageSetup.PrintArea = rango.Address
+        ws.PageSetup.Orientation = 2 if horizontal else 1
+        ws.PageSetup.PaperSize = 9
 
         ws.PageSetup.Zoom = False
         ws.PageSetup.FitToPagesWide = 1
         ws.PageSetup.FitToPagesTall = 1
-        ws.PageSetup.Orientation = 2 if horizontal else 1
 
-        # Márgenes pequeños para aprovechar la página
         ws.PageSetup.LeftMargin = excel.CentimetersToPoints(0.5)
         ws.PageSetup.RightMargin = excel.CentimetersToPoints(0.5)
         ws.PageSetup.TopMargin = excel.CentimetersToPoints(0.5)
@@ -416,19 +453,17 @@ def excel_resumen_a_pdf_una_hoja(ruta_excel, ruta_pdf=None, hoja=None, horizonta
         ws.PageSetup.HeaderMargin = 0
         ws.PageSetup.FooterMargin = 0
 
-        # Centrar en la página
         ws.PageSetup.CenterHorizontally = True
         ws.PageSetup.CenterVertically = True
 
-        # ========================================================
-        # EXPORTAR PDF
-        # ========================================================
+        excel.PrintCommunication = True
+
+        print(f"Zoom: {ws.PageSetup.Zoom}")
+        print(f"Fit ancho: {ws.PageSetup.FitToPagesWide}")
+        print(f"Fit alto: {ws.PageSetup.FitToPagesTall}")
+        print(f"Área impresión: {ws.PageSetup.PrintArea}")
 
         ws.ExportAsFixedFormat(0, str(ruta_pdf), Quality=0, IncludeDocProperties=True, IgnorePrintAreas=False, OpenAfterPublish=False)
-
-        print(f"Excel convertido a PDF: {ruta_pdf}")
-        # ultima_celda = ws.Cells(ultima_fila, ultima_columna).Address.replace("$", "")
-        # print(f"Rango impreso: A1:{ultima_celda}")
 
         return str(ruta_pdf)
 
@@ -438,6 +473,16 @@ def excel_resumen_a_pdf_una_hoja(ruta_excel, ruta_pdf=None, hoja=None, horizonta
 
         if excel is not None:
             excel.Quit()
+
+        # ========================================================
+        # RESTAURAR IMPRESORA ORIGINAL
+        # ========================================================
+
+        if impresora_original:
+            try:
+                win32print.SetDefaultPrinter(impresora_original)
+            except Exception:
+                pass
 
 def convertir_orden_excel_a_pdf(ruta_excel: str | Path) -> Path:
     """
@@ -2199,6 +2244,7 @@ def leer_excel_resumen(directorio_articulo):
         for archivo in directorio_articulo.iterdir()
         if archivo.is_file()
         and "resumen" in archivo.name.lower()
+        and "formateado" not in archivo.name.lower()
         and archivo.suffix.lower() in (".xlsx", ".xls")
         and not archivo.name.startswith("~$")
     ]
@@ -4400,7 +4446,6 @@ def formatear_resumen_excel(ruta_excel, ruta_salida=None, hoja=None, device=None
 
                     fila = siguiente
 
-
     def aplicar_bordes_contenido(ws):
 
         borde_fino = Side(style="thin", color="000000")
@@ -4584,7 +4629,6 @@ def formatear_resumen_excel(ruta_excel, ruta_salida=None, hoja=None, device=None
 
     pares_lote_unid = []
 
-
     for col_lote in columnas_lote:
 
         col_posible_unid = col_lote + 1
@@ -4617,7 +4661,6 @@ def formatear_resumen_excel(ruta_excel, ruta_salida=None, hoja=None, device=None
                     col_posible_unid
                 )
             )
-
 
     # ============================================================
     # OBTENER BLOQUES DE ÓRDENES DE PRODUCCIÓN
@@ -4979,8 +5022,6 @@ def formatear_resumen_excel(ruta_excel, ruta_salida=None, hoja=None, device=None
     # ========================================================
 
     consolidar_lotes_y_unidades_final(ws=ws, bloques_op=bloques_op, pares_lote_unid=pares_lote_unid)
-
-
 
     # ========================================================
     # CONSOLIDAR ALBARANES Y PNT VACIOS
@@ -5721,6 +5762,184 @@ def localizar_documentacion_batchrecord(dispositivo_br, consola_br, carpeta_docu
         return list(dict.fromkeys(rutas))
 
     # ========================================================
+    # BUSCAR RESUMEN LOTES
+    # ========================================================
+
+    def localizar_resumenes_articulos(estructura_documental, carpeta_erp=RUTA_ERP):
+        carpeta_erp = Path(carpeta_erp)
+        carpeta_id = carpeta_erp / "I+D"
+        extensiones_excel = {".xlsx", ".xls", ".xlsm", ".xlsb"}
+
+        if not carpeta_erp.exists():
+            raise FileNotFoundError(f"No existe la carpeta ERP: {carpeta_erp}")
+
+        def pertenece_a_carpeta_articulo(archivo, articulo, carpeta_base):
+            articulo_normalizado = str(articulo).strip().upper()
+
+            try:
+                relativa = archivo.relative_to(carpeta_base)
+            except ValueError:
+                return False
+
+            return any(parte.strip().upper() == articulo_normalizado for parte in relativa.parts[:-1])
+
+        for articulo, datos_articulo in estructura_documental.get("componentes", {}).items():
+
+            articulo_normalizado = str(articulo).strip().upper()
+
+            pdf_lotes = []
+            excel_lotes = []
+
+            pdf_resumen_id = []
+            excel_resumen_id = []
+
+            # ========================================================
+            # 1. BÚSQUEDA NORMAL EN ERP
+            #    EXCLUYENDO I+D
+            #
+            #    Nombre:
+            #        ARTICULO + LOTES
+            # ========================================================
+
+            for archivo in carpeta_erp.rglob("*"):
+
+                if not archivo.is_file():
+                    continue
+
+                if archivo.name.startswith("~$"):
+                    continue
+
+                try:
+                    relativa_erp = archivo.relative_to(carpeta_erp)
+                except ValueError:
+                    continue
+
+                # No buscar aquí dentro de I+D
+                if relativa_erp.parts and relativa_erp.parts[0].strip().upper() == "I+D":
+                    continue
+
+                if not pertenece_a_carpeta_articulo(archivo, articulo, carpeta_erp):
+                    continue
+
+                nombre_normalizado = archivo.stem.strip().upper()
+
+                if articulo_normalizado not in nombre_normalizado:
+                    continue
+
+                if "LOTES" not in nombre_normalizado:
+                    continue
+
+                if archivo.suffix.lower() == ".pdf":
+                    pdf_lotes.append(str(archivo))
+
+                elif archivo.suffix.lower() in extensiones_excel:
+                    excel_lotes.append(str(archivo))
+
+            # ========================================================
+            # SI HEMOS ENCONTRADO PDF DE LOTES -> TERMINAMOS
+            # ========================================================
+
+            if pdf_lotes:
+                datos_articulo["resumen"] = pdf_lotes[0]
+
+                # print(f"RESUMEN LOTES -> {articulo}: {pdf_lotes[0]}")
+
+                continue
+
+            # ========================================================
+            # 2. FALLBACK EN ERP\I+D
+            #
+            #    Buscar:
+            #        ARTICULO_RESUMEN...
+            #
+            #    Ejemplos admitidos:
+            #        CABLEPLANO_RESUMEN.pdf
+            #        CABLEPLANO_RESUMEN_formateado.pdf
+            #        CABLEPLANO_RESUMEN.xlsx
+            # ========================================================
+
+            if carpeta_id.exists():
+
+                prefijo_resumen = f"{articulo_normalizado}_RESUMEN"
+
+                for archivo in carpeta_id.rglob("*"):
+
+                    if not archivo.is_file():
+                        continue
+
+                    if archivo.name.startswith("~$"):
+                        continue
+
+                    if not pertenece_a_carpeta_articulo(archivo, articulo, carpeta_id):
+                        continue
+
+                    nombre_normalizado = archivo.stem.strip().upper()
+
+                    if not nombre_normalizado.startswith(prefijo_resumen):
+                        continue
+
+                    if archivo.suffix.lower() == ".pdf":
+                        pdf_resumen_id.append(str(archivo))
+
+                    elif archivo.suffix.lower() in extensiones_excel:
+                        excel_resumen_id.append(str(archivo))
+
+            # ========================================================
+            # SI HEMOS ENCONTRADO PDF EN I+D -> TERMINAMOS
+            # ========================================================
+
+            if pdf_resumen_id:
+                datos_articulo["resumen"] = pdf_resumen_id[0]
+
+                print(f"RESUMEN I+D -> {articulo}: {pdf_resumen_id[0]}")
+
+                continue
+
+            # ========================================================
+            # 3. NO EXISTE NINGÚN PDF
+            #
+            #    Comprobar si al menos existe Excel en alguna
+            #    de las dos búsquedas.
+            # ========================================================
+
+            excels_encontrados = excel_lotes + excel_resumen_id
+
+            if excels_encontrados:
+                datos_articulo["resumen"] = None
+
+                estructura_documental["no_encontrados"].append({
+                    "articulo": articulo,
+                    "proveedor": "",
+                    "tipo": "RESUMEN",
+                    "referencia": "LOTES / RESUMEN",
+                    "msg": f"Se ha encontrado un Excel de resumen para el artículo {articulo}, pero no existe el PDF correspondiente.",
+                    "excel_encontrado": excels_encontrados[0]
+                })
+
+                print(f"ERROR RESUMEN -> {articulo}: existe Excel pero falta PDF")
+
+                continue
+
+            # ========================================================
+            # 4. NO EXISTE NI PDF NI EXCEL
+            # ========================================================
+
+            datos_articulo["resumen"] = None
+
+            estructura_documental["no_encontrados"].append({
+                "articulo": articulo,
+                "proveedor": "",
+                "tipo": "RESUMEN",
+                "referencia": "LOTES / RESUMEN",
+                "msg": f"No se ha encontrado ningún resumen PDF ni Excel para el artículo {articulo}, ni mediante LOTES en ERP ni mediante {articulo}_RESUMEN en I+D."
+            })
+
+            print(f"ERROR RESUMEN -> {articulo}: no existe PDF ni Excel")
+
+        return estructura_documental
+
+
+    # ========================================================
     # ESTRUCTURA
     # ========================================================
 
@@ -5955,6 +6174,9 @@ def localizar_documentacion_batchrecord(dispositivo_br, consola_br, carpeta_docu
 
     estructura["rutas"] = rutas_finales
 
+
+    estructura = localizar_resumenes_articulos(estructura)
+
     # ========================================================
     # CONTROL FINAL DE INTEGRIDAD
     #
@@ -5984,6 +6206,7 @@ def localizar_documentacion_batchrecord(dispositivo_br, consola_br, carpeta_docu
             documento["rutas"] = rutas_correctas
 
     return estructura
+
 
 def buscar_saltos_numeros_serie(directorio):
 
@@ -6109,7 +6332,7 @@ if __name__ == "__main__":
         
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ PROCESAR TRAZABILIDAD Y DOCUMENTACION ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━═════════════════════════════════════════════════════════════════════════════┛
 
-    articulos_IMD = os.listdir(RUTA_IMD)      # Todos los articulos 
+    # articulos_IMD = os.listdir(RUTA_IMD)      # Todos los articulos 
     articulos_IMD = ['CABLEPLANO']        # Elegir manualmente los articulos
 
     articulos_procesados = [] # Lista que contiene los articulos ya procesados
@@ -6117,238 +6340,261 @@ if __name__ == "__main__":
     print("\n Combirtiendo lotes a PDF")
 
     consulta = input(f"\nQuieres regenerar los .pdf de los LOTES de materias NO fabricadas Tarda MUCHO? (S/N): ")
-
-    if consulta.capitalize() != "S":
+    if consulta.capitalize() == "S":
         convertir_excels_lotes_erp_a_pdf() # Recorre todos los excels de ERP menos los de I+D y lso combierte a PDF
 
-    for i in INDICE_ARTICULOS:
+    consulta = input(f"\nQuieres procesar las OP?(S/N): ")
+    if consulta.capitalize() == "S":
 
-        # print("\nProcesando los articulos de: ",i,'\n')
+        for i in INDICE_ARTICULOS:
 
-        # Procesamos los articulos ordenados de menos procesado a mas procesado
-        for articulo in dic_config[i]:
-            
-            # if i  in 'DISPOSITIVOS':
-            #     break # No procesamos aun los dispositivos
+            # print("\nProcesando los articulos de: ",i,'\n')
 
-            # if i in 'MATERIA PRIMA N2':
-            #     break # No procesamos aun la materia prima de nivel 2 (Consolas)
-
-            # if i in 'MATERIA PRIMA N1':
-            #     break # No procesamos aun la materia prima de nivel 1
-
-            if articulo in articulos_IMD:
+            # Procesamos los articulos ordenados de menos procesado a mas procesado
+            for articulo in dic_config[i]:
                 
-                print("Procesando el articulo: ",articulo)
-                articulos_procesados.append(articulo)
-                articulos_pendientes.remove(articulo)
-                
-                ruta_carpeta_articulo =  Path(RUTA_IMD + articulo +'/')
+                # if i  in 'DISPOSITIVOS':
+                #     break # No procesamos aun los dispositivos
 
-                normalizar_nombres_archivos(ruta_carpeta_articulo) # Normalizamos los nombres de los archivos en la carpeta del artículo
+                # if i in 'MATERIA PRIMA N2':
+                #     break # No procesamos aun la materia prima de nivel 2 (Consolas)
 
-                ordenes_produccion_excel = [
-                    archivo
-                    for archivo in ruta_carpeta_articulo.iterdir()
-                    if archivo.is_file()
-                    and archivo.suffix.lower() in (".xlsx", ".xls")
-                    and patron_orden_produccion.fullmatch(archivo.stem.strip())
-                ]
-                
-                ordenes_produccion_excel = ordenar_ordenes_produccion(ordenes_produccion_excel)
+                # if i in 'MATERIA PRIMA N1':
+                #     break # No procesamos aun la materia prima de nivel 1
 
-                lista_dataframes_ordenes = [] # es una lista que contiene todos los dataframes de consumos de las ordenes que se van a procesar y se usar para unirlos luego al resumen
-                
-                # Leemos el resuemnexistente de ordnes del articulo si existe, sino lo creamos
-                try:
-                    df_resumen, ordenes_procesadas, ruta_resumen = leer_excel_resumen(ruta_carpeta_articulo)
-
-                except:
+                if articulo in articulos_IMD:
                     
-                    print(f" \nAVISO: No se pudo leer el resumen existente en {ruta_carpeta_articulo} se va a realizar el reseteo del resumen del articulo {articulo}.\n")
-                    time.sleep(1)
+                    print("Procesando el articulo: ",articulo)
+                    articulos_procesados.append(articulo)
+                    articulos_pendientes.remove(articulo)
                     
-                    ordenes_procesadas = []
-                    df_resumen = pd.DataFrame()
-                    ruta_resumen = ruta_carpeta_articulo / f"{articulo}_RESUMEN.xlsx"
+                    ruta_carpeta_articulo =  Path(RUTA_IMD + articulo +'/')
 
-                else:
-                    lista_dataframes_ordenes.append(df_resumen)
-                
-                if MODO_RESET: # Fuerza que se procesen todas las carpetas de ordenes desde 0
+                    normalizar_nombres_archivos(ruta_carpeta_articulo) # Normalizamos los nombres de los archivos en la carpeta del artículo
 
-                    lista_dataframes_ordenes = [] # Limpiamos la lista
-                    ordenes_procesadas = []
-                    ruta_resumen = ruta_carpeta_articulo / f"{articulo}_RESUMEN.xlsx"
-                    df_resumen = pd.DataFrame()
-                
-                ordenes_por_procesar = obtener_ordenes_por_procesar(ordenes_produccion_excel, ordenes_procesadas)
-                # print("\ordenes_por_procesar del articulo {articulo}:\n",ordenes_por_procesar)
-        
-                for ruta_orden_excel in ordenes_por_procesar:
-                    # print(f"Procesando orden de producción: {ruta_orden_excel.name}...")
-                    print("\n")
-                    df_consumos_orden = procesar_orden(ruta_orden_excel)
+                    ordenes_produccion_excel = [
+                        archivo
+                        for archivo in ruta_carpeta_articulo.iterdir()
+                        if archivo.is_file()
+                        and archivo.suffix.lower() in (".xlsx", ".xls")
+                        and patron_orden_produccion.fullmatch(archivo.stem.strip())
+                    ]
+                    
+                    ordenes_produccion_excel = ordenar_ordenes_produccion(ordenes_produccion_excel)
 
-                    if GENERAR_PDF_ORDENES:
-                        ruta_pdf = str(Path(ruta_orden_excel).with_suffix(".pdf"))
-                        if not Path(ruta_pdf).exists():
-                            print(f"Generando PDF de la orden {ruta_orden_excel.name}...")
-                            convertir_orden_excel_a_pdf(ruta_orden_excel)
-                        else:
-                            print(f"El PDF de la orden {ruta_orden_excel.name} ya existe, no se generará de nuevo.")
+                    lista_dataframes_ordenes = [] # es una lista que contiene todos los dataframes de consumos de las ordenes que se van a procesar y se usar para unirlos luego al resumen
+                    
+                    # Leemos el resuemnexistente de ordnes del articulo si existe, sino lo creamos
+                    try:
+                        df_resumen, ordenes_procesadas, ruta_resumen = leer_excel_resumen(ruta_carpeta_articulo)
 
-                    if df_consumos_orden is not None: # Si no es none
-                        lista_dataframes_ordenes.append(df_consumos_orden)
-                
-                df_resumen = pd.concat(lista_dataframes_ordenes,ignore_index=True)
+                    except:
+                        
+                        print(f" \nAVISO: No se pudo leer el resumen existente en {ruta_carpeta_articulo} se va a realizar el reseteo del resumen del articulo {articulo}.\n")
+                        time.sleep(1)
+                        
+                        ordenes_procesadas = []
+                        df_resumen = pd.DataFrame()
+                        ruta_resumen = ruta_carpeta_articulo / f"{articulo}_RESUMEN.xlsx"
 
-                # Guardamos el dataframe en el excel resumen del artuculo
-                df_resumen.to_excel(ruta_resumen, index=False)
+                    else:
+                        lista_dataframes_ordenes.append(df_resumen)
+                    
+                    if MODO_RESET: # Fuerza que se procesen todas las carpetas de ordenes desde 0
 
-                ruta_excel_formateado = ruta_resumen.with_name(f"{ruta_resumen.stem}_formateado{ruta_resumen.suffix}")
-                print(f"\nFormateando resumen excel del articulo {articulo} ...")
-                formatear_resumen_excel(ruta_resumen, ruta_salida = ruta_excel_formateado, hoja=None, device = articulo)
-                print(f"\nImprimiendo resumen excel del articulo {articulo} ...")
-                excel_resumen_a_pdf_una_hoja(ruta_excel_formateado)
-
-    # Guardamos el dataframe en el excel resumen del artuculo
-    df_errores = pd.DataFrame(set(lista_errores))
-    df_errores.to_excel(
-        './errores.xlsx',
-        index=False
-    )
+                        lista_dataframes_ordenes = [] # Limpiamos la lista
+                        ordenes_procesadas = []
+                        ruta_resumen = ruta_carpeta_articulo / f"{articulo}_RESUMEN.xlsx"
+                        df_resumen = pd.DataFrame()
+                    
+                    ordenes_por_procesar = obtener_ordenes_por_procesar(ordenes_produccion_excel, ordenes_procesadas)
+                    # print("\ordenes_por_procesar del articulo {articulo}:\n",ordenes_por_procesar)
             
-    print('\nSe han procesado los articulos:',articulos_procesados)
-    print('\nQuedan pendientes de procesar:',articulos_pendientes,'\n')
-    time.sleep(2)
+                    for ruta_orden_excel in ordenes_por_procesar:
+                        # print(f"Procesando orden de producción: {ruta_orden_excel.name}...")
+                        print("\n")
+                        df_consumos_orden = procesar_orden(ruta_orden_excel)
 
+                        if GENERAR_PDF_ORDENES:
+                            ruta_pdf = str(Path(ruta_orden_excel).with_suffix(".pdf"))
+                            if not Path(ruta_pdf).exists():
+                                print(f"Generando PDF de la orden {ruta_orden_excel.name}...")
+                                convertir_orden_excel_a_pdf(ruta_orden_excel)
+                            else:
+                                print(f"El PDF de la orden {ruta_orden_excel.name} ya existe, no se generará de nuevo.")
 
-    # saltos = buscar_saltos_numeros_serie(RUTA_IMD)
-    # if saltos:
-    #     print("\nSALTOS DE NUMERACIÓN DETECTADOS:\n")
+                        if df_consumos_orden is not None: # Si no es none
+                            lista_dataframes_ordenes.append(df_consumos_orden)
+                    
+                    df_resumen = pd.concat(lista_dataframes_ordenes,ignore_index=True)
 
-    #     for resultado in saltos:
-    #         print(f'{resultado["articulo"]}: {resultado["saltos"]}')
+                    # Guardamos el dataframe en el excel resumen del artuculo
+                    df_resumen.to_excel(ruta_resumen, index=False)
 
-    #     consulta = input(f"\nSe detectaron OP faltantes que causan saltos de numeros de serie que se muestran más arriba , quieres continuar realizando el BachRecord?(S/N): ")
-    #     if consulta.capitalize() != "S":
-    #         raise ValueError(
-    #             f"Se termino la ejecucion del bachrecord por falta de informacion en en las ordenes de produccion" )
+                    ruta_excel_formateado = ruta_resumen.with_name(f"{ruta_resumen.stem}_formateado{ruta_resumen.suffix}")
+                    print(f"\nFormateando resumen excel del articulo {articulo} ...")
+                    formatear_resumen_excel(ruta_resumen, ruta_salida = ruta_excel_formateado, hoja=None, device = articulo)
+                    print(f"\nImprimiendo resumen excel del articulo {articulo} ...")
+                    excel_resumen_a_pdf_una_hoja(ruta_excel_formateado)
+
+        # Guardamos el dataframe en el excel resumen del artuculo
+        df_errores = pd.DataFrame(set(lista_errores))
+        df_errores.to_excel(
+            './errores.xlsx',
+            index=False
+        )
+                
+        print('\nSe han procesado los articulos:',articulos_procesados)
+        print('\nQuedan pendientes de procesar:',articulos_pendientes,'\n')
+        time.sleep(2)
+
+        saltos = buscar_saltos_numeros_serie(RUTA_IMD)
+        if saltos:
+            print("\nSALTOS DE NUMERACIÓN DETECTADOS:\n")
+
+            for resultado in saltos:
+                print(f'{resultado["articulo"]}: {resultado["saltos"]}')
+
+            consulta = input(f"\nSe detectaron OP faltantes que causan saltos de numeros de serie que se muestran más arriba , quieres continuar realizando el BachRecord?(S/N): ")
+            if consulta.capitalize() != "S":
+                raise ValueError(
+                    f"Se termino la ejecucion del bachrecord por falta de informacion en en las ordenes de produccion" )
     
-    # # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ PROCESAMOS INFORMACION EXCLUSIVA DEL BACHRECORD ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━═════════════════════════════════════════════════════════════════════════════┛
-    # # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ PROCESAMOS INFORMACION EXCLUSIVA DEL BACHRECORD ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━═════════════════════════════════════════════════════════════════════════════┛
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-    # # PRIMER PEDIMOS LOS NUMEROS DE SERIE DEL BACHRECORD QUE SE QUIERE GENERAR
+    # PRIMER PEDIMOS LOS NUMEROS DE SERIE DEL BACHRECORD QUE SE QUIERE GENERAR
     
-    # # procesar = input("Quiere procesar el bachrecord de un dispositivo? (S/N): ").strip().lower() # TODO DESCOMENTAR AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-    # procesar = "s"# TODO BORRAR AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    procesar = input("Quiere procesar el bachrecord de un dispositivo? (S/N): ").strip().lower() # TODO DESCOMENTAR AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+    procesar = "s"# TODO BORRAR AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 
-    # if procesar == "s":
+    if procesar == "s":
 
-    #     # dispositivo = input("Introduzca el nombre del dispositivo: ").strip()# TODO DESCOMENTAR AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-    #     dispositivo = "EPTEV02DEV01"# TODO BORRAR  AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+        # dispositivo = input("Introduzca el nombre del dispositivo: ").strip()# TODO DESCOMENTAR AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+        dispositivo = "EPTEV02DEV01"# TODO BORRAR  AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 
-    #     while dispositivo not in DISPOSITIVOS:
-    #         print(f"El dispositivo '{dispositivo}' no es válido. Los dispositivos : {', '.join(DISPOSITIVOS)}")
-    #         dispositivo = input("Introduzca el nombre del dispositivo: ").strip()
+        while dispositivo not in DISPOSITIVOS:
+            print(f"El dispositivo '{dispositivo}' no es válido. Los dispositivos : {', '.join(DISPOSITIVOS)}")
+            dispositivo = input("Introduzca el nombre del dispositivo: ").strip()
 
-    #     # Obtenemos el DataFrame del resumen de la orden de producción del dispositivo
-    #     ruta_carpeta_articulo =  Path(RUTA_IMD + dispositivo +'/')
-    #     df_resumen, _, _ = leer_excel_resumen(ruta_carpeta_articulo)
-    #     ns_producidos = (df_resumen["NUMERO_SERIE"].dropna().astype(str).unique().tolist())
+        # Obtenemos el DataFrame del resumen de la orden de producción del dispositivo
+        ruta_carpeta_articulo =  Path(RUTA_IMD + dispositivo +'/')
+        df_resumen, _, _ = leer_excel_resumen(ruta_carpeta_articulo)
+        ns_producidos = (df_resumen["NUMERO_SERIE"].dropna().astype(str).unique().tolist())
         
-    #     ns_inicio_br = "EPB1250384" # TODO BORRAR  AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-    #     ns_final_br = "EPB1260953" # TODO BORRAR  AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+        ns_inicio_br = "EPB1250384" # TODO BORRAR  AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+        ns_final_br = "EPB1260953" # TODO BORRAR  AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
 
-    #     # ns_inicio_br = input("Introduzca el número de serie inicial: ").strip()
-    #     # while ns_inicio_br not in ns_producidos:
-    #     #     print(f"El número de serie '{ns_inicio_br}' no es válido. Los números de serie estan comprendidos entre: {ns_producidos[0]} y {ns_producidos[-1]}")
-    #     #     ns_inicio_br = input("Introduzca el número de serie inicial: ").strip()
+        # ns_inicio_br = input("Introduzca el número de serie inicial: ").strip()
+        # while ns_inicio_br not in ns_producidos:
+        #     print(f"El número de serie '{ns_inicio_br}' no es válido. Los números de serie estan comprendidos entre: {ns_producidos[0]} y {ns_producidos[-1]}")
+        #     ns_inicio_br = input("Introduzca el número de serie inicial: ").strip()
 
-    #     # ns_final_br = input("Introduzca el número de serie final: ").strip()
-    #     # while ns_final_br not in ns_producidos or ns_final_br < ns_inicio_br:
-    #     #     if ns_final_br < ns_inicio_br:
-    #     #         print(f"El número de serie final '{ns_final_br}' no puede ser menor que el número de serie inicial '{ns_inicio_br}'.")
-    #     #     elif ns_final_br not in ns_producidos:
-    #     #         print(f"El número de serie '{ns_final_br}' no es válido. Los números de serie estan comprendidos entre: {ns_producidos[0]} y {ns_producidos[-1]}")
-    #     #     ns_final_br = input("Introduzca el número de serie final: ").strip()
+        # ns_final_br = input("Introduzca el número de serie final: ").strip()
+        # while ns_final_br not in ns_producidos or ns_final_br < ns_inicio_br:
+        #     if ns_final_br < ns_inicio_br:
+        #         print(f"El número de serie final '{ns_final_br}' no puede ser menor que el número de serie inicial '{ns_inicio_br}'.")
+        #     elif ns_final_br not in ns_producidos:
+        #         print(f"El número de serie '{ns_final_br}' no es válido. Los números de serie estan comprendidos entre: {ns_producidos[0]} y {ns_producidos[-1]}")
+        #     ns_final_br = input("Introduzca el número de serie final: ").strip()
 
+        # A PARTIR DE ESTE PUNTO YA TENEMOS EL DISPOSITIVO Y LOS NUMEROS DE SERIE QUE SE QUIEREN PROCESAR PARA EL BACHRECORD
+        df_dispoitivoBR = filtrar_filas_entre_valores(df_resumen, "NUMERO_SERIE", ns_inicio_br, ns_final_br) # Nos quedamos unicamente con los ns que queremos para el bachredord
+        df_dispoitivoBR = eliminar_articulos_vacios_df(df_dispoitivoBR) # Eliminamos los articulos vacios que se generan por culpa de haber cambiado las estructuras de las producciones
+        df_dispoitivoBR.to_excel('./temp/DispositivoBR_temp.xlsx', index=False)# guardamos en excel si queremos consultar algo
 
+        info_faltante = revisa_informacion_bachrecord(df_dispoitivoBR, dispositivo)
 
-    #     # A PARTIR DE ESTE PUNTO YA TENEMOS EL DISPOSITIVO Y LOS NUMEROS DE SERIE QUE SE QUIEREN PROCESAR PARA EL BACHRECORD
-    #     df_dispoitivoBR = filtrar_filas_entre_valores(df_resumen, "NUMERO_SERIE", ns_inicio_br, ns_final_br) # Nos quedamos unicamente con los ns que queremos para el bachredord
-    #     df_dispoitivoBR = eliminar_articulos_vacios_df(df_dispoitivoBR) # Eliminamos los articulos vacios que se generan por culpa de haber cambiado las estructuras de las producciones
-    #     df_dispoitivoBR.to_excel('./temp/DispositivoBR_temp.xlsx', index=False)# guardamos en excel si queremos consultar algo
+        if info_faltante:
+            for error in info_faltante:
+                print(error["msg"])
 
-    #     info_faltante = revisa_informacion_bachrecord(df_dispoitivoBR, dispositivo)
+            consulta = input(f"\nSe detecto informacion faltante en el resumen principal puedes revisar la informacion en './temp/DispositivoBR_temp.xlsx', quieres continuar realizando el BachRecord? (S/N): ")
+            if consulta.capitalize() != "S":
+                raise ValueError(
+                    f"Se termino la ejecucion del bachrecord por falta de informacion en './temp/DispositivoBR_temp.xlsx'" )
 
-    #     if info_faltante:
-    #         for error in info_faltante:
-    #             print(error["msg"])
+        # Antes de formatear el excel nos hemos aseguraamos de que todo el contenido que necesitmaos esta
+        formatear_resumen_excel('./temp/DispositivoBR_temp.xlsx', ruta_salida='./temp/DispTempFiltrado.xlsx', hoja=None, device = dispositivo)
+        print("Archivo temporal filtrado y formateado guardado en './temp/DispTempFiltrado.xlsx'.")
 
-    #         consulta = input(f"\nSe detecto informacion faltante en el resumen principal puedes revisar la informacion en './temp/DispositivoBR_temp.xlsx', quieres continuar realizando el BachRecord? (S/N): ")
-    #         if consulta.capitalize() != "S":
-    #             raise ValueError(
-    #                 f"Se termino la ejecucion del bachrecord por falta de informacion en './temp/DispositivoBR_temp.xlsx'" )
+        # REPRETIMOS EL PROCESO ANTERIOR CON LA CONSOLA
+        consola = DISPOSITIVO_CONSOLA[dispositivo]
 
+        ruta_excel_consola =  RUTA_IMD + consola +"/"+ f"{consola}_RESUMEN.xlsx" 
+        df_consola = pd.read_excel(ruta_excel_consola)
 
+        df_consolaBR = filtrar_filas_entre_valores(df_consola, "NUMERO_SERIE", ns_inicio_br, ns_final_br) # Nos quedamos unicamente con los ns que queremos para el bachredord
+        df_consolaBR = eliminar_articulos_vacios_df(df_consolaBR) # Eliminamos los articulos vacios que se generan por culpa de haber cambiado las estructuras de las producciones
+        df_consolaBR.to_excel('./temp/ConsolaBR_temp.xlsx', index=False) # Guardamos en excel si queremos consultar algo
 
-    #     # Antes de formatear el excel nos hemos aseguraamos de que todo el contenido que necesitmaos esta
-    #     formatear_resumen_excel('./temp/DispositivoBR_temp.xlsx', ruta_salida='./temp/DispTempFiltrado.xlsx', hoja=None, device = dispositivo)
-    #     print("Archivo temporal filtrado y formateado guardado en './temp/DispTempFiltrado.xlsx'.")
+        info_faltante = revisa_informacion_bachrecord(df_consolaBR, consola)
 
-    #     # REPRETIMOS EL PROCESO ANTERIOR CON LA CONSOLA
-    #     consola = DISPOSITIVO_CONSOLA[dispositivo]
+        if info_faltante:
+            for error in info_faltante:
+                print(error["msg"])
 
-    #     ruta_excel_consola =  RUTA_IMD + consola +"/"+ f"{consola}_RESUMEN.xlsx" 
-    #     df_consola = pd.read_excel(ruta_excel_consola)
-
-    #     df_consolaBR = filtrar_filas_entre_valores(df_consola, "NUMERO_SERIE", ns_inicio_br, ns_final_br) # Nos quedamos unicamente con los ns que queremos para el bachredord
-    #     df_consolaBR = eliminar_articulos_vacios_df(df_consolaBR) # Eliminamos los articulos vacios que se generan por culpa de haber cambiado las estructuras de las producciones
-    #     df_consolaBR.to_excel('./temp/ConsolaBR_temp.xlsx', index=False) # Guardamos en excel si queremos consultar algo
-
-    #     info_faltante = revisa_informacion_bachrecord(df_consolaBR, consola)
-
-    #     if info_faltante:
-    #         for error in info_faltante:
-    #             print(error["msg"])
-
-    #         consulta = input(f"\nSe detecto informacion faltante en el resumen principal de la consola puedes revisar la informacion en './temp/ConsolaBR_temp.xlsx', quieres continuar realizando el BachRecord? (S/N): ")
-    #         if consulta.capitalize() != "S":
-    #             raise ValueError(
-    #                 f"Se termino la ejecucion del bachrecord por falta de informacion en el resumen principal de la consola './temp/ConsolaBR_temp.xlsx' " )
+            consulta = input(f"\nSe detecto informacion faltante en el resumen principal de la consola puedes revisar la informacion en './temp/ConsolaBR_temp.xlsx', quieres continuar realizando el BachRecord? (S/N): ")
+            if consulta.capitalize() != "S":
+                raise ValueError(
+                    f"Se termino la ejecucion del bachrecord por falta de informacion en el resumen principal de la consola './temp/ConsolaBR_temp.xlsx' " )
 
 
-    #     # Antes de formatear el excel nos aseguraamos de que todo el contenido que necesitmaos esta
-    #     formatear_resumen_excel('./temp/ConsolaBR_temp.xlsx', ruta_salida='./temp/ConsolaTempFiltrado.xlsx', hoja=None, device = consola)
-    #     print("Archivo temporal filtrado y formateado guardado en './temp/ConsolaTempFiltrado.xlsx'.")
+        # Antes de formatear el excel nos aseguraamos de que todo el contenido que necesitmaos esta
+        formatear_resumen_excel('./temp/ConsolaBR_temp.xlsx', ruta_salida='./temp/ConsolaTempFiltrado.xlsx', hoja=None, device = consola)
+        print("Archivo temporal filtrado y formateado guardado en './temp/ConsolaTempFiltrado.xlsx'.")
 
-    #     estructura_documental = localizar_documentacion_batchrecord(dispositivo_br=df_dispoitivoBR,consola_br=df_consolaBR,)
+        estructura_documental = localizar_documentacion_batchrecord(dispositivo_br=df_dispoitivoBR,consola_br=df_consolaBR,)
 
             
-    #     if estructura_documental["no_encontrados"]:
+        if estructura_documental["no_encontrados"]:
 
-    #         print("\nHAY DOCUMENTOS NO ENCONTRADOS:")
+            print("\nHAY DOCUMENTOS NO ENCONTRADOS:")
 
-    #         for documento in estructura_documental["no_encontrados"]:
-    #             print(f'{documento["articulo"]} - {documento["proveedor"]} - {documento["tipo"]} - {documento["referencia"]}')
+            for documento in estructura_documental["no_encontrados"]:
+                print(f'{documento["articulo"]} - {documento["proveedor"]} - {documento["tipo"]} - {documento["referencia"]}')
 
-    #     else:
+        else:
 
-    #         print("Se ha localizado toda la documentación.")
+            print("Se ha localizado toda la documentación.")
 
-    guardar_diccionario(estructura_documental)
-    print("Estructura documental guardada correctamente")
+        guardar_diccionario(estructura_documental)
+        print("Estructura documental guardada correctamente")
 
     estructura_documental = cargar_diccionario()
+
+    for a in estructura_documental['componentes']:
+        b = estructura_documental['componentes'][a]["resumen"]
+        print(b)
+        # for a in estructura_documental['componentes']
+
 
     # for valor in estructura_documental["componentes"]["PHB1V01"]['albaran_op']:
 
     #     # pprint(clave)
     #     pprint(valor['rutas'])
     #     time.sleep(1)
+
+    # print("\n" + "=" * 100)
+    # print("ERRORES DE ESTRUCTURA DOCUMENTAL")
+    # print("=" * 100)
+
+    # errores = estructura_documental.get("no_encontrados", [])
+
+    # if not errores:
+    #     print("No se han encontrado errores.")
+    # else:
+    #     for i, error in enumerate(errores, start=1):
+    #         print(f"\nERROR {i}")
+    #         print("-" * 100)
+
+    #         for clave, valor in error.items():
+    #             print(f"{clave.upper()}: {valor}")
+
+    # print("\n" + "=" * 100)
+    # print(f"TOTAL ERRORES: {len(errores)}")
+    # print("=" * 100)
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ CREAR PDF ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━═════════════════════════════════════════════════════════════════════════════┛
